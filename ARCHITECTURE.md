@@ -3,10 +3,10 @@
 The complete on-box stack for the **dedicated Hetzner VM per customer**
 substrate. Every box runs single-node k3s (Traefik + servicelb enabled) with
 its own ArgoCD, which syncs this repository — one `Application` per directory
-under `charts/`, all of them reached from `charts/root`. One git tree serves the whole
-fleet, but boxes do **not** track `master` — or any branch. Each box pins an
-immutable commit and moves when its operator moves it; see
-[Fleet rollout](#fleet-rollout) below.
+under `charts/`, all of them reached from `charts/root`, and nothing outside
+`charts/` is deployed. One git tree serves the whole fleet, but boxes do
+**not** track `master` — or any branch. Each box pins an immutable commit and
+moves when its operator moves it; see [Fleet rollout](#fleet-rollout) below.
 
 **This tree is published**, because every box's ArgoCD must be able to pull it
 without a credential — read [PUBLIC.md](./PUBLIC.md) first for what that means
