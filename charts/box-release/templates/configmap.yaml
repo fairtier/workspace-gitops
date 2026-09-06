@@ -64,8 +64,15 @@ data:
       -d '{}') || :
     if [ "$HTTP" != "200" ]; then
       # 404 = nothing published for this box yet; 501 = a control plane that
-      # predates the RPC; anything else = unavailable. All the same answer.
-      echo "NOTE: GetBoxRevision returned $HTTP — pin unchanged"
+      # predates the RPC; anything else = unavailable. All the same answer —
+      # keep the pin — but they are NOT the same diagnosis, so log the body.
+      #
+      # A Connect error carries one ({"code":"not_found",...}); an EMPTY body
+      # with a 404 is the gateway, not the handler: the RPC's path prefix is
+      # missing from the box-facing HTTPRoute, and no box will ever be moved.
+      # That distinction cost a real debugging session on 2026-09-06, because
+      # both look like a control plane with nothing to say.
+      echo "NOTE: GetBoxRevision returned $HTTP — pin unchanged; body: $(head -c 200 /tmp/release.json)"
       exit 0
     fi
 

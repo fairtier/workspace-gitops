@@ -138,17 +138,27 @@ betterstackCollectorEnabled: false
 # path: it asks the control plane which commit of this tree to run and patches
 # box-root.
 #
-# OFF until the control plane on the other end of it answers. The agent
-# degrades safely either way (a control plane that 404s or cannot be reached
-# leaves the pin untouched), so this gate is about ordering, not risk: turn it
-# on once `GetBoxRevision` is deployed AND a revision is published for this
-# box, so the first run is a no-op that proves the path rather than a silent
-# nothing that proves neither half.
+# ON since 2026-09-06. The gate it was waiting on is met and was verified from
+# a box rather than assumed: a client-credentials token minted off the box's
+# own Casdoor, POSTed to GetBoxRevision, answering
+# {"revision":"...","channel":"stable"} for the commit that box was already
+# pinned to. The check earned its place — the first attempt returned a
+# bodiless 404 because the RPC's path prefix was missing from the box-facing
+# HTTPRoute, a fault the agent reports as "nothing published" and survives
+# indefinitely.
 #
-# Leaving it off is a supported state, not a broken one — it is exactly what a
-# self-hosted or severed box runs. The pin then moves the way it does for any
-# owner: edit targetRevision and its matching helm parameter on box-root.
-releaseAgentEnabled: false
+# Turning this ON is ITSELF A RELEASE, which fixes the order of the three acts
+# that turn it on: publish this flip, `release set stable <the new commit>`,
+# and only THEN move the pin. Move the pin first and the channel still names
+# the older commit, so the agent's first act is dragging the box backwards to
+# where it does not exist — pruning itself.
+#
+# Setting it back to false is a supported state, not a broken one — it is what
+# a self-hosted or severed box runs, and it is the severance lever: deleting
+# this Application removes every path by which anyone but the box's own
+# operator deploys to it. The pin then moves the way it does for any owner:
+# edit targetRevision and its matching helm parameter on box-root.
+releaseAgentEnabled: true
 
 # --- Fixed layout -------------------------------------------------------------
 # Namespace holding the whole FairTier stack + the cloud-init-written
