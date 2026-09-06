@@ -1,0 +1,37 @@
+# On-box PostgreSQL — plain postgres:17-alpine StatefulSet, house style
+# mirrored from the central platform Postgres (no Bitnami).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/name: postgres
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Normally created by cloud-init (it writes the per-customer Secrets
+      # there first); CreateNamespace is a safety net only.
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

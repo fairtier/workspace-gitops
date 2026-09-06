@@ -1,0 +1,131 @@
+# The retire script, in a NORMAL (non-hook) resource on purpose: ArgoCD does
+# not diff hook manifests, so a script embedded in the hook Job would change
+# in git without ever making the app OutOfSync — nothing would trigger the
+# sync that runs it (the lesson from the ensure-databases hook, 065a832).
+# Editing this ConfigMap makes the app OutOfSync, which runs the hook.
+#
+# Wave -2 with the RBAC, i.e. before the wave -1 hook Job mounts it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bootstrap-retire
+  namespace: kube-system
+  labels:
+    app: bootstrap-retire
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  retire.sh: |
+    #!/bin/bash
+    # Writes a k3s `.skip` sentinel next to each cloud-init-written manifest
+    # whose GitOps twin is in place, retiring the frozen second writer.
+    #
+    # k3s applies /var/lib/rancher/k3s/server/manifests at every start, so
+    # each of these files silently reverts day-2 changes to the objects it
+    # carries on every boot — including the nightly unattended-upgrades
+    # reboot. Per the k3s docs, "creating a .skip file after an addon has
+    # been deployed will not remove or otherwise modify it or the resources
+    # it created": only the file's existence matters, its contents are
+    # ignored, and nothing already applied is touched.
+    #
+    # Idempotent and non-fatal: a guard that has not been satisfied yet just
+    # leaves the file alone and reports it, so the next run can retire it.
+    set -euo pipefail
+
+    MANIFESTS="${MANIFESTS_DIR:?MANIFESTS_DIR not set}"
+    STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    retired=0
+    waiting=0
+
+    # NEVER glob this directory. It also holds k3s's own packaged components
+    # (traefik.yaml, coredns.yaml, local-storage.yaml, metrics-server/) —
+    # skipping those would freeze them at their installed version and break
+    # k3s upgrades. Only the three fairtier-* files below are ours.
+    retire() {   # retire <file> <what GitOps owns instead> <guard that passed>
+      local file="$1" owner="$2" guard="$3"
+      local path="$MANIFESTS/$file"
+
+      if [ ! -e "$path" ]; then
+        echo "  $file: not on this box — nothing to retire"
+        return 0
+      fi
+      if [ -e "$path.skip" ]; then
+        echo "  $file: already retired"
+        return 0
+      fi
+
+      cat > "$path.skip" <<EOF
+    Retired by charts/bootstrap-retire at $STAMP.
+
+    k3s re-applies every manifest in this directory at each start, so the
+    frozen provisioning-day copy of $file was a second writer for objects
+    that GitOps owns day-2 — and the one that ran last. This sentinel makes
+    k3s ignore the file. Everything the file already created is untouched
+    (k3s docs: a .skip added after deployment modifies nothing).
+
+    Now owned by: $owner
+    Guard that had to pass first: $guard
+
+    Consequence, deliberately: those objects are no longer re-created from
+    cloud-init. Deleting one is now recoverable only from git, or over SSH
+    for the bootstrap identity that has no GitOps twin (the fairtier-repo
+    deploy-token Secret). That is the point — it is what lets a rotated
+    credential, a moved revision pin, or a values fix survive a reboot.
+
+    To undo: rm this file (k3s re-applies $file at the next start).
+    EOF
+      echo "  $file: RETIRED"
+      retired=$((retired + 1))
+    }
+
+    skipped() {   # skipped <file> <why not yet>
+      echo "  $1: waiting — $2"
+      waiting=$((waiting + 1))
+    }
+
+    echo "cloud-init manifest retirement, $STAMP ($MANIFESTS)"
+
+    # --- 1. ArgoCD HelmChart + the fairtier-repo deploy-token Secret --------
+    # Guard: the HelmChartConfig that carries the release's values exists, so
+    # a re-apply of the frozen HelmChart can no longer change what is
+    # rendered. Retiring the file additionally pins `version` (a spec field a
+    # HelmChartConfig cannot override) and stops the provisioning-day deploy
+    # token being restored over a rotated one.
+    if kubectl -n kube-system get helmchartconfig.helm.cattle.io argo-cd >/dev/null 2>&1; then
+      retire fairtier-argocd.yaml \
+        "charts/argocd (HelmChart CR + HelmChartConfig)" \
+        "HelmChartConfig/argo-cd exists in kube-system"
+    else
+      skipped fairtier-argocd.yaml "no HelmChartConfig/argo-cd yet (charts/argocd not synced)"
+    fi
+
+    # --- 2. Root app-of-apps Application ------------------------------------
+    # Guard: ArgoCD's tracking annotation on box-root, which only the
+    # self-managed twin (charts/root/templates/root-app.yaml) puts there.
+    # Its presence proves the twin has been applied, so the Application is
+    # git-owned and a ring-branch move will stick across a reboot.
+    tracking="$(kubectl -n argocd get application box-root \
+      -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null || true)"
+    if [ -n "$tracking" ]; then
+      retire fairtier-root-app.yaml \
+        "charts/root/templates/root-app.yaml (self-managed root app)" \
+        "Application/box-root carries tracking-id $tracking"
+    else
+      skipped fairtier-root-app.yaml "Application/box-root not adopted by the app-of-apps yet"
+    fi
+
+    # --- 3. Per-customer contract Secrets/ConfigMaps ------------------------
+    # These have no GitOps twin by design — they are the centrally-known
+    # credentials, adopted by the seed Jobs. The guard is only that the file
+    # was applied on this box at all; retiring it is what makes rotating one
+    # of them stick.
+    if kubectl -n fairtier-system get configmap box-config >/dev/null 2>&1 ||
+       kubectl -n fairtier-system get secret postgres-credentials >/dev/null 2>&1; then
+      retire fairtier-bootstrap.yaml \
+        "the box itself — seed Jobs adopt these; rotation is day-2 ops" \
+        "the contract objects exist in fairtier-system"
+    else
+      skipped fairtier-bootstrap.yaml "contract objects not found in fairtier-system"
+    fi
+
+    echo "done: $retired retired, $waiting waiting"

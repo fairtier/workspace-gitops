@@ -1,0 +1,28 @@
+apiVersion: v2
+name: box-release
+description: >-
+  The deploy agent: asks the control plane which commit of this GitOps tree
+  this box should run, and patches the box's own root Application to match.
+
+  It exists because a box pins an IMMUTABLE COMMIT rather than following a
+  branch. A branch is a pointer inside the artifact, so whoever can push to the
+  artifact moves every box that follows it — and can stop one by deleting it.
+  Pinning removes that, at the cost of needing a day-2 write path, which is
+  this chart. The other route from the operator to a box, cloud-init, is
+  create-only on the provider: the ref it bakes is frozen for the life of the
+  machine.
+
+  Everything about the direction of travel is deliberate. The box authenticates
+  OUTBOUND with its own identity and asks; nothing reaches inward, so no
+  credential exists anywhere that could deploy into this cluster. If the
+  control plane is unreachable, or answers nothing, the box keeps its pin and
+  keeps running.
+
+  This chart is therefore the ENTIRETY of the hosting provider's ability to
+  deploy to this box. Delete it and no write path remains — the box goes on
+  running at its pin indefinitely, and upgrading becomes what it already is for
+  a self-hosted operator: set targetRevision (and repoURL, to run your own
+  fork) on the root Application. Same two fields, same object, nothing new to
+  learn. See ARCHITECTURE.md, "Fleet rollout".
+type: application
+version: 0.1.0

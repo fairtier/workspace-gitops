@@ -1,0 +1,156 @@
+# Values for the box app-of-apps chart.
+#
+# The first block is injected per-box by cloud-init through the root
+# Application's helm parameters (see ../root-app.yaml). The defaults here
+# are placeholders — a box never runs with them.
+#
+# The second block pins chart versions for the whole fleet. Bumping a pin
+# here rolls every box on the next ArgoCD sync (fleet rollout = merge to
+# master).
+
+# --- Per-box (cloud-init injected) -----------------------------------------
+slug: ""            # customer slug, e.g. "vmdev"
+baseDomain: "fairtier.com"
+acmeEmail: ""       # Let's Encrypt account email
+repoURL: "https://github.com/fairtier/workspace-gitops.git"
+# No default, deliberately. A box pins an immutable commit, and a chart that
+# silently fell back to a branch here would break that contract at exactly the
+# moment it mattered — a box rendered without its parameter would start
+# following a moving ref instead of failing. templates/root-app.yaml turns the
+# empty value into a render error.
+targetRevision: ""
+
+# --- Fleet-wide version pins ------------------------------------------------
+# Sources for the pins are recorded in ARCHITECTURE.md.
+certManagerChartVersion: "v1.20.2"   # same pin as the central cluster
+lakekeeperChartVersion: "0.11.x"     # same pin as the frozen shared path
+duckflightChartVersion: "0.0.7"      # duckflight tag helm/v0.0.7 — extensions.image now means EXTRAS (union over the baked set; unset = no initContainer); 0.0.6 added reconcileSql mount + tempDir (box-only; shared path is ❄️ frozen at 0.0.4)
+alloyChartVersion: "1.10.0"          # same pin as the central Alloy
+# Better Stack eBPF collector. Pinned but NOT deployed — see the gate below.
+betterstackCollectorChartVersion: "v0.1.44"
+# The box's OWN ArgoCD (charts/argocd HelmChart CR). Bootstrap installs the
+# version cloud-init pins — keep the two in sync; bumping THIS pin is what
+# upgrades already-provisioned boxes day-2.
+argocdChartVersion: "9.5.21"         # matches the bootstrap pin
+# Fleet k3s version (charts/system-upgrade Plan). Bumping this pin
+# upgrades k3s on every box day-2 — cloud-init's install version
+# (var.k3s_version in the tenants roots) only matters at first boot; the
+# Plan converges any box past it. Keep both moving together.
+k3sVersion: "v1.36.2+k3s1"
+
+# --- Per-box arming ----------------------------------------------------------
+# How many orphaned Iceberg files this box may DELETE per table per run.
+# 0 (the default, and what every box provisions with) leaves
+# charts/iceberg-maintenance in its chart-default `dry-run`, which finds and
+# reports unreachable files and removes none. Any value > 0 arms the sweep at
+# that cap.
+#
+# THIS IS A PER-BOX VALUE, and it is a scalar rather than a slug -> cap map for
+# a reason worth not re-litigating: the chart is pulled by EVERY box, so a map
+# keyed by slug puts one customer's identity — and, in the comment justifying
+# the entry, their warehouse profile — into every other customer's ArgoCD. It
+# is also simply the wrong shape: a box has one cap, not a table of everyone's.
+#
+# It is set the way the other per-box values are (see ../root-app.yaml and
+# templates/root-app.yaml): a helm parameter on the box's own `box-root`
+# Application. The chart renders that Application from its own parameters, so
+# the spec is a fixed point and an edit sticks across syncs and k3s restarts.
+# Day-2 arming is therefore an edit of that live parameter — NOT a commit
+# here. It is the same shape as moving the revision pin, which is what the
+# deploy agent (box-release) automates; nothing automates this one, by
+# design.
+#
+# Arming is per box because the evidence is per warehouse: what an armed box
+# asserts is that on THAT box's objects the orphan set and the live set are
+# disjoint. A box whose tables were written by an engine we have not met is not
+# covered by another box's proof — DuckDB's Iceberg writer already decodes
+# differently enough that compaction is unsafe on the tables it wrote. Until
+# 2026-08-28 `mode: delete` sat in the chart's own values.yaml, which armed
+# every box the fleet would ever provision off one box's evidence.
+#
+# Raising this value IS the arming action, so do it in the order the runbook
+# gives: read that box's dry-run
+# report, run `python -m iceberg_maintenance.verify --read-back` on the box and
+# get every check PASS, arm at 1000 for one night, read the tables back, then
+# raise the cap.
+#
+# The cap is a duration budget as much as a blast radius: R2 DELETEs go one at
+# a time and the observed rate is 1.8-3.6/s, so 5000 is a ~23-47 min delete
+# pass — which has to stay clear of the 03:30 backup window on a box with no
+# headroom.
+orphanSweepMaxDeletes: 0
+
+# --- Feature gates ------------------------------------------------------------
+# The box-local workspace plane (charts/workspace-api, Phase 3B of the
+# control-plane/workspace-plane split). Ships shadow — nothing is
+# pointed at it yet — so this gate is the fleet lever: false removes the
+# Application entirely (ArgoCD prunes it), true ships it. Per-BOX rollout is
+# which commit each box is pinned to, not this flag (see
+# ARCHITECTURE.md#fleet-rollout).
+workspaceApiEnabled: true
+
+# Point the dlt-worker's FAIRTIER_API_URL at the box's own workspace-api
+# instead of central's worker-api — the moment the phone-home dies (Phase 3C).
+#
+# Enabled on the canary box 2026-08-01, and since Phase 4 there is no
+# other setting: central serves no worker RPCs, so `false` points the worker at
+# an API that will not answer it.
+#
+# The ordering rule this used to carry — turn on only after the customer's
+# cutover marker is set, or the worker polls the box for Run-now triggers the
+# Console is still writing centrally — went with the marker. So did the
+# promotion hazard that followed from it (a fleet-wide gate over a per-customer
+# decision): the decision no longer exists, and the gate is now simply true
+# everywhere.
+workspacePlaneLocal: true
+
+# The box-hosted workspace Console (charts/console) — the split Console's
+# workspace half, served at
+# console.customer-<slug>.<baseDomain>. Depends only on things every box
+# already has: the wildcard DNS record, the box Casdoor `console` app +
+# Secret console-oidc from the workspace-api seed Job (which registered the
+# redirect URI up front), and workspace-api itself — so it requires
+# workspaceApiEnabled. Per-BOX rollout is the revision each box pins, as ever.
+consoleEnabled: true
+
+# The Better Stack eBPF collector (charts/betterstack-collector). Gives RED
+# metrics and a service map for software nobody instrumented — the layer we
+# lack entirely today, between node metrics and pod logs.
+#
+# OFF, and not merely "not rolled out yet": the agent requests ~2 GiB, a
+# cx-class box is ~3.7 GB and one already spent 110 minutes livelocked at 18-20 %
+# headroom, and k3s runs with no memory eviction signal so a box under pressure
+# thrashes rather than shedding load. Turning this on today reproduces
+# the 2026-08-13 box-livelock incident on purpose.
+#
+# What would change it is a measurement, not an argument — the same agent is
+# being sized on the central cluster
+# to find out whether the vendor's "settles to 200-500MiB" holds.
+#
+# **Flip order matters and is not optional.** The Terraform gate
+# (betterstack_collector_enabled, worker env BETTERSTACK_COLLECTOR_ENABLED)
+# goes first so the `betterstack-collector` Secret lands via box-secrets;
+# only then this. Reversed, the DaemonSet cannot authenticate. Full argument
+# and the three-step order: charts/betterstack-collector/values.yaml.
+betterstackCollectorEnabled: false
+
+# The deploy agent (charts/box-release) — the box half of the managed deploy
+# path: it asks the control plane which commit of this tree to run and patches
+# box-root.
+#
+# OFF until the control plane on the other end of it answers. The agent
+# degrades safely either way (a control plane that 404s or cannot be reached
+# leaves the pin untouched), so this gate is about ordering, not risk: turn it
+# on once `GetBoxRevision` is deployed AND a revision is published for this
+# box, so the first run is a no-op that proves the path rather than a silent
+# nothing that proves neither half.
+#
+# Leaving it off is a supported state, not a broken one — it is exactly what a
+# self-hosted or severed box runs. The pin then moves the way it does for any
+# owner: edit targetRevision and its matching helm parameter on box-root.
+releaseAgentEnabled: false
+
+# --- Fixed layout -------------------------------------------------------------
+# Namespace holding the whole FairTier stack + the cloud-init-written
+# per-customer Secrets/ConfigMaps. Do not change without changing cloud-init.
+stackNamespace: "fairtier-system"

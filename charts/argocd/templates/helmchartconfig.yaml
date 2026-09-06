@@ -1,0 +1,149 @@
+# THE values for the box's ArgoCD release — deliberately a HelmChartConfig
+# rather than the `valuesContent` of the HelmChart next to it.
+#
+# Why: cloud-init writes its own copy of the HelmChart to
+# /var/lib/rancher/k3s/server/manifests/fairtier-argocd.yaml, that file is
+# frozen at the box's provisioning date (user_data is immutable), and k3s
+# re-applies everything in that directory at EVERY k3s start — not only the
+# first. So the CR had two writers: a frozen one that fires on every boot and
+# the GitOps one that owns it day-2, with the frozen one running last. On
+# 2026-08-10 a single `systemctl restart k3s` on a box put all five ArgoCD
+# pods back to BestEffort, undoing 439cf88 (see the incident in
+# ARCHITECTURE.md, "Legacy-box migration: ArgoCD QoS reverts").
+#
+# A HelmChartConfig ends that for the values, on every box, with no SSH:
+# the k3s helm-controller passes it to helm as an ADDITIONAL value file, so
+# it is merged over the HelmChart's own valuesContent whatever that happens
+# to contain. Nothing in cloud-init writes a HelmChartConfig, so this file
+# has exactly one writer and the boot re-apply of the frozen HelmChart can
+# no longer change the rendered release. Where to look on a box (verified
+# against klipper-helm v0.11.1): Secret `chart-values-argo-cd` holds both
+# under the keys `HelmChartValuesContent` and `HelmChartConfigValuesContent`,
+# and the helm-install Job projects them into /config as
+# `values-<n>-<nnn>-HelmChart[Config]-ValuesContent.yaml`.
+#
+# Two residues this does NOT cover, both handled by retiring the cloud-init
+# manifest itself (charts/bootstrap-retire/):
+#   1. `version` is a HelmChart spec field, not values — a GitOps chart bump
+#      still reverts at the next k3s start until the file is retired;
+#   2. merging is per-key: REMOVING a key here does not remove it from the
+#      frozen HelmChart's copy. To retire a setting on a legacy box, override
+#      it with the chart default rather than deleting the key.
+#
+# Sync wave -1 so this exists before the HelmChart in this same chart drops
+# its `valuesContent`; otherwise a legacy box could briefly render with chart
+# defaults (= BestEffort) between the two applies.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: argo-cd
+  namespace: kube-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  valuesContent: |-
+    configs:
+      cm:
+        # Pin tracking method — see the ArgoCD v3 label→annotation flip
+        # incident on the central cluster.
+        application.resourceTrackingMethod: annotation+label
+      params:
+        # No inbound access to the box; the API server is only used by
+        # the in-cluster controllers.
+        server.insecure: true
+    # Resource requests exist here for ONE reason: QoS class, not capacity.
+    #
+    # With no requests a pod is BestEffort, and the kubelet stamps it
+    # oom_score_adj=1000 — the kernel's first choice under node-wide memory
+    # pressure. The application-controller is the single largest memory
+    # consumer on a box (~221Mi measured, more than postgres or the
+    # dlt-worker), so "no requests" meant the biggest process on the box was
+    # also the most killable. It was OOM-killed twice in July, both times
+    # CONSTRAINT_NONE (node-wide, not its own limit), and repo-server/server
+    # carried restart counts of 112/110. That is the mechanism behind the
+    # "OOM cascade freezes GitOps sync" incident: the controller dies, so
+    # nothing reconciles the damage.
+    #
+    # A request moves the pod to Burstable, where oom_score_adj scales down
+    # with the reservation — so ArgoCD stops being sacrificed ahead of the
+    # workload that actually caused the spike.
+    #
+    # Deliberately requests-only, no limits. A memory limit would trade a
+    # node-wide kill for a memcg kill during a large sync, which is the same
+    # outage with a different label. Values are funded by trimming
+    # over-reservations elsewhere on the box, so the node's total requests do
+    # not grow — see the sizing note in ARCHITECTURE.md. Keep that
+    # net-neutrality when editing: the nightly iceberg-maintenance CronJob
+    # needs 256Mi/100m to schedule at all, and there is less than that in
+    # spare headroom.
+    #
+    # The original numbers here (controller 221Mi, repo-server 43Mi, appset
+    # 33Mi, server 28Mi, redis 8Mi) came from single `kubectl top` samples and
+    # were re-derived on 2026-08-13 from seven days of working set. Three were
+    # fine; repo-server and redis were not, and are corrected below. The
+    # controller is the one that could not be corrected: p95 272Mi against
+    # this 256Mi request, so it too sits above its reservation — raising it
+    # needs headroom the box does not currently have (see ARCHITECTURE.md).
+    controller:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 256Mi
+      metrics:
+        # argocd_app_info (sync/health per app) — scraped by the box Alloy
+        # and shipped centrally (charts/observability/).
+        enabled: true
+    # The liveness timeouts below are a SEPARATE fix from the requests above,
+    # for a failure that looks identical from the outside and is not.
+    #
+    # repo-server restarted 18× in 4h37m with
+    # lastState.terminated = {Completed, exitCode 0} — a graceful SIGTERM, which
+    # is what kubelet sends on a failed liveness probe, not what an OOM kill
+    # looks like (MemoryPressure was False and the kernel logged no kills).
+    # The chart's default liveness probe is GET /healthz?full=true — a *deep*
+    # check — with timeoutSeconds 1. A container holding 25m CPU (~1.25% of a
+    # two-core box) loses CPU arbitration during a helm render, misses the 1s
+    # deadline 3× in a row, and is restarted; every app it was comparing goes
+    # to Unknown, so drift stops being detected. argocd-server (15m) has the
+    # same shape.
+    #
+    # 5s rather than bigger CPU requests: a 1s deadline on a deep health check
+    # is tight for any box, and CPU here is the scarce resource the sizing note
+    # above is careful about. failureThreshold 3 × periodSeconds 10 is
+    # untouched, so a genuinely wedged repo-server is still restarted within
+    # ~30s — this only stops counting "busy" as "dead".
+    # 64Mi was sized from "43Mi measured" — one `kubectl top` sample taken with
+    # nothing rendering. repo-server's whole job is bursty (a helm render per
+    # app), and seven days of working set say avg 60Mi, p95 112Mi, max 175Mi:
+    # it is above its request whenever it is doing the thing it exists to do.
+    # 128Mi covers p95 with margin; the tail to 175Mi is deliberately not
+    # reserved, since a request is a standing claim and this one is a spike.
+    repoServer:
+      resources:
+        requests:
+          cpu: 25m
+          memory: 128Mi
+      livenessProbe:
+        timeoutSeconds: 5
+    server:
+      resources:
+        requests:
+          cpu: 15m
+          memory: 48Mi
+      livenessProbe:
+        timeoutSeconds: 5
+    applicationSet:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 48Mi
+    # 7d working set: avg 8Mi, p95 9Mi, max 10Mi — flattest series on the box.
+    redis:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+    dex:
+      enabled: false
+    notifications:
+      enabled: false

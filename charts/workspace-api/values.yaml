@@ -1,0 +1,348 @@
+# slug + baseDomain are injected by the app-of-apps
+# (charts/root/templates/workspace-api.yaml); placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+# The workspace plane is its own public repo + image
+# (github.com/fairtier/workspace-api → ghcr.io/fairtier/workspace-api),
+# imported by the central FairTier API as a versioned Go module. Public
+# GHCR on purpose: boxes have no pull secret. No :latest.
+#
+# 0.3.0 was the first tag with the box binary's final env contract
+# (WORKSPACE_CASDOOR_ORG/_ISSUER required, single-issuer trust) and the
+# split-review fixes: worker RPCs gated off the public mux, service
+# accounts refused as workspace members, stuck-run sweep scoped to this
+# box's slug, adopt sweep gated per git-primary flag.
+#
+# 0.4.0 adds hydration: this database starts EMPTY, and adoption only
+# tracks files it holds a render row for, so without an import pass the
+# box serves nothing until every object is saved through it once. The
+# adopt sweep now also imports the repo's untracked definition files as
+# rows, keeping the ids the files carry (run rows and the central cache
+# address the same objects). Read-only toward the repos, never deletes.
+#
+# 0.5.0 is the security review of the workspace plane.
+#
+# 0.6.0 is what lets a browser reach this box at all (Phase 3C):
+#   - GET /.well-known/fairtier-workspace, unauthenticated, telling the
+#     Console which Casdoor to sign in against — it cannot present a token
+#     before it knows that, so this one endpoint must answer without one.
+#     Public facts only, enforced by a reflection test over Workspace.
+#   - WORKSPACE_CONSOLE_CLIENT_ID, the box Casdoor app it advertises.
+#   - a converge no longer deletes definition files this deployment never
+#     wrote. Hydration REFUSES files it cannot parse, and those were then
+#     collected as stale on the next converge — the box deleting the
+#     customer's only copy of its own file. Deletion is now scoped to
+#     files carrying the rendered header.
+#
+# 0.7.0 makes a run report an upsert on the id it carries — update the row,
+# and create it under that same id when there is none. Required before the
+# dlt-worker is pointed at this deployment's own database (Phase 3D,
+# charts/dlt workspaceDb.localPlaneDatabase): the worker records the run
+# first and reports the same id, and without the upsert an id this database
+# has not seen would either be dropped or answered with a second row for the
+# same run. Roll it WITH the dlt-worker 0.5.0 bump, not after.
+#
+# 0.8.0 lets the starter demo read its datasets with NO credential, over the
+# public origin below — see demoPublicBaseURL. Needs dlt-worker >= 0.6.0.
+#
+# 0.9.0 attributes a commit to the person who made it. A box has no users
+# table, so every commit it wrote carried the platform identity; the author now
+# comes from the profile claims of the caller's own token, which this box's
+# Casdoor minted. Nothing to configure — but it only works while the Console
+# application issues JWT-Standard (the seed Job below converges that on every
+# sync), because the two Casdoor token formats disagree about what `name`
+# means. The demo sizing tiers also move with it, from whole calendar years to
+# windows ending at the newest mirrored TLC month.
+#
+# 0.10.0 makes the Google OAuth *application* the customer's own: the box stores
+# the pair in customer_oauth_clients (its mirror needs it to render the .age
+# credential files for Sheets pipelines) but still cannot serve the consent
+# popup, so GetOAuthClient reports flow_available=false and new connections are
+# made from the central Console. The old GOOGLE_OAUTH_CLIENT_ID variable is
+# gone — the box template never set it.
+#
+# 0.11.0 is the box minting and depositing its own federation OAuth client
+# instead of central minting one and writing the secret onto a machine the
+# customer has root over. The seed Job already does the deposit
+# (charts/casdoor/templates/seed-job.yaml step 7) and central already accepts
+# it — this image is what was behind.
+#
+# 0.12.0 names the key that encrypted each credential (`enc:<key id>:…`), which
+# is what makes a rotation finishable — see credentialEncryption below.
+# ONE-WAY: a value written under the
+# new envelope cannot be read by 0.11.0 or older, so a rollback past this leaves
+# rows written in the meantime unreadable until you roll forward again. Nothing
+# is lost — the key still opens them, the old binary just cannot parse the
+# envelope. 0.12.1 stops the rewrap sweep from reverting a credential saved
+# while it runs (compare-and-swap on the ciphertext it read).
+#
+# 0.13.0 adds OTel traces + metrics, inert unless OTEL_EXPORTER_OTLP_ENDPOINT is
+# set — the box Alloy still drops every signal (deployment.yaml leaves it unset).
+#
+# 0.15.0 adds workspace-level Connections (query-time federation: one Google
+# authorization shared by DLT and the engine) — migration 000002 plus the
+# ConnectionService the Console's Integrations card talks to.
+#
+# 0.16.0 is what makes all of that USABLE on a cut-over box, where central's
+# write freeze refuses every mutating workspace RPC by design:
+#   - migration 000003 catches up the 000001 squash edit (customer_oauth_clients
+#     + google_oauth_grants.client_id) that boxes provisioned before 0.10.0
+#     never received — the "relation customer_oauth_clients does not exist" 500;
+#   - the box serves its own Google consent flow when GOOGLE_OAUTH_REDIRECT_URL
+#     + GOOGLE_OAUTH_STATE_SECRET are set (deployment.yaml wires both; the
+#     customer registers the api.customer-<slug> callback in their Google app);
+#   - the internal mux mounts a minter-only BoxCredentialService, so the
+#     box-secrets sync loop fetches the DuckFlight reconcile SQL from THIS
+#     box's connections instead of central's (which cannot see them).
+#
+# 0.16.1 wires PipelineService.GoogleOAuth: 0.16.0 minted grants but could not
+# redeem one embedded in a pipeline save (the Console's fallback path), failing
+# with "Sign in with Google is not enabled on this server".
+#
+# 0.16.2 trims the static box credentials read from env: the dlt-age Secret
+# holds age-keygen's output newline included, which central trimmed on the way
+# in but the box binary read raw — the first credential-bearing save since
+# cut-over died on 'malformed recipient "age1…\n"'.
+#
+# 0.17.0 breaks the reconnect deadlock: re-authorizing an already-connected
+# Google account updates that connection in place (it was rejected as a
+# duplicate), and UpdatePipelineRequest.clear_credentials finally lets a
+# pipeline detach — without which the connection's in-use guard could never be
+# satisfied.
+#
+# 0.18.0 publishes the sibling-service endpoints in the bootstrap document
+# (lakekeeper_url/_warehouse, duckflight_url, and rill_url/cube_url only
+# while the app is enabled — never an endpoint nothing serves), so the box
+# Console can render the catalog card and launch links without a second
+# discovery path. Same disclosure class as customer_domain: public DNS
+# names plus a warehouse label, guarded by the bootstrap leak test. Pairs
+# with console 0.2.0; either order is safe (absent fields degrade).
+#
+# 0.18.3 makes the mirror scope gate say WHY it skipped a customer, instead of
+# returning the same silent (false, nil) for three different reasons. Central's
+# concern rather than the box's — a box always has its credentials — but this
+# is the first tag the box carries it.
+#
+# 0.19.0 retires DepositGitToken / DepositSnapshotToken / DepositAgePublicKey
+# (split Phase 3E): the box writes its own repos, so central holding a copy of
+# the box's git token bought nothing. Box-visible only as three RPCs the box's
+# own minter-only service no longer mounts — nothing on the box called them.
+# The matching seed-Job callers go in the same roll (rill x2, dlt x1), so this
+# image and those charts must land together; either order is safe (the RPC
+# answers 404 / the deposit simply is not attempted).
+#
+# 0.20.0 moves the auth primitives into the module's shared kernel. Nothing
+# box-visible: no env, no RPC, no wire change.
+#
+# 0.21.0 carries three things, one of which needs the chart change below:
+#   - giteaURL / rillSnapshotURL — this box stops dialing its OWN Gitea and
+#     rill-snapshot over the public internet. Both are dial-only (the Gitea
+#     contents API and the snapshot sidecar's RPC), never advertised to a
+#     browser, which is why they get their own overrides rather than reusing
+#     LakekeeperURL/DuckFlightURL — those two are published in
+#     /.well-known/fairtier-workspace, so pointing either in-cluster would fix
+#     the dial and hand the customer an unreachable address. The exposure was
+#     boot ordering, not steady state: the adopt and hydration sweeps run at
+#     process start, and https://git.<domain> additionally waits on its
+#     Let's Encrypt certificate. Same reasoning as AUTH_JWKS_URL above.
+#   - the Casdoor SDK is the upstream one again (v1.53.0), not our fork. This
+#     is the first box image on it, and the id/owner ordering differs on the
+#     wire — so a service-account create + delete against this box's Casdoor
+#     is the smoke test that matters after the roll, not the pod going Ready.
+#   - a missing Lakekeeper OIDC pair reports FailedPrecondition instead of
+#     Internal (a misconfigured box now says so).
+#   - 0.21.1 is a rebuild only: Go 1.27 plus refreshed deps, and a proto
+#     comment rewritten so the generated stubs stop depending on which Go
+#     built protoc-gen-go. No API or behaviour change.
+#
+# 0.22.0 takes AI drafting live: the provider selection becomes a ladder
+# (an operator's own DEEPSEEK_/ANTHROPIC_ key, any OpenAI-compatible
+# endpoint via LLM_*, then the FairTier assist relay via FAIRTIER_ASSIST_*,
+# which the deployment template sets below when assistRelay is on). The
+# relay sends the prepared prompt to central, which holds the LLM keys —
+# no provider key on the box, ever. Until this roll every draft RPC
+# answered UNIMPLEMENTED on every box, since nothing anywhere had a key.
+#
+# 0.23.0 adds the two diagnosis surfaces (DraftSql — schema-aware NL-to-SQL
+# with best-effort EXPLAIN validation; ExplainError — server-assembled,
+# credential-redacted failure context by run id) and vendors Rill's
+# agent-skills excerpts into the Rill draft prompt. Pairs with box console
+# 0.5.0, which grows the buttons.
+#
+# 0.27.0 shrinks GetPipelineConfigs to a trigger feed (pipelines-as-files
+# Phase 2.5): every definition field leaves the wire, the box checkout is
+# the source of truth unconditionally, and both *_GIT_PRIMARY levers are
+# gone. **Roll it with dlt-worker 0.9.0, never ahead of it** — an older
+# worker parses definitions by field number and reads a shrunk response as
+# "every pipeline is scheduleless", which fails silently as an idle box.
+#
+# 0.28.0 accepts the `duckdb` source type (extraction through a DuckDB
+# extension; validators + drafter capability). Roll it with dlt-worker
+# 0.10.0, never ahead of it — a save the worker cannot run fails on the
+# box, not here.
+#
+# 0.29.0 widens the duckdb extension allowlist to the dlt-worker 0.11.0
+# baked set (mssql, firebird, pdf, webbed, httpfs) — same ordering rule.
+#
+# 0.30.0 drops firebird from the allowlist, following dlt-worker 0.12.0.
+#
+# 0.31.0 allows gdrive (worker 0.13.0) — Drive files as a pipeline source.
+#
+# 0.32.0 retires the query-time-federation engine consumer: no more
+# minter-only BoxCredentialService on the box, no DuckFlight reconcile SQL.
+# Connections stay — they are the pipeline wizard's Google credential.
+#
+# 0.33.0 makes a Drive pipeline payable by signing in: a duckdb/gdrive
+# pipeline references a workspace Google connection, and the consent asks
+# for drive.file — only where Drive is read (?capability=drive), never on a
+# Sheets sign-in. What Google GRANTED is recorded on the grant and the
+# connection (migration 000004 adds google_oauth_grants.scopes), so a save
+# refuses a Drive pipeline on a Sheets-only account instead of leaving it to
+# 403 in a scheduled run. Roll it with console 0.11.0 — the Console reads
+# Connection.scopes to say so at the picker. NOTE for the customer: their own
+# Google app must list drive.file on its consent screen (Integrations shows
+# the list); Google refuses a consent asking for a scope the app never
+# declared.
+#
+# 0.33.1 makes that last sentence legible when it happens: a refusal from
+# Google's consent named the fix ("add the scope to your app's consent
+# screen") instead of the one generic "access was not granted" every refusal
+# used to produce, and Google's own description now reaches the box log
+# instead of being dropped. Our wording per error code, never an echo — the
+# branch runs before the state is verified.
+# 0.34.0 tells the Console which DuckDB extensions this box accepts
+# (capabilities.duckdb_extensions in /.well-known/fairtier-workspace), so the
+# source picker can offer one tile per system — MySQL, a PDF, a Drive file —
+# without holding a second copy of the allowlist. Roll it with console 0.12.0,
+# which renders the intersection; an older Console ignores the field, and a
+# newer Console against an older box offers every tile it has (the pre-0.34.0
+# behaviour). Also stops the drafter teaching read_pdf('gdrive://…'): a
+# pipeline LOADs one extension and DuckDB does not autoload a community
+# extension's functions, so that draft saved and then failed on the box.
+# 0.35.0 lets a source be tested before a pipeline is ever saved:
+# TestSourceConnection queues a probe, the box's own dlt-worker (>= 0.15.0)
+# claims it and runs it in its run isolation, GetSourceTest reports it, and
+# `capabilities.testable_source_types` tells the Console which types can be
+# probed at all — so an older box simply shows no card. The test's credential
+# is encrypted like a pipeline's, dropped on completion and swept on a TTL,
+# and an edit form may name its pipeline rather than retype a password.
+# Migration 000005 adds `source_tests`. Also accepts a plural `extensions` in
+# a duckdb source config (a Drive PDF is two). Roll it with console 0.13.0 and
+# dlt-worker 0.15.0.
+image: ghcr.io/fairtier/workspace-api:0.35.0
+# kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
+seedImage: alpine/k8s:1.33.13
+
+# Box Postgres (same StatefulSet as gitea/casdoor/etc.). MVP uses the
+# superuser from the postgres-credentials Secret; a dedicated role is the
+# same tracked hardening follow-up the dlt worker carries.
+#
+# NOT the dlt-worker's `workspace` database (charts/workspace-db): that
+# one is migrated by its own golang-migrate lineage, and this binary runs
+# the module's — two lineages must never share one `schema_migrations`.
+# They converge in Phase 3D, when the worker is pointed here instead.
+postgres:
+  host: postgresql.fairtier-system.svc.cluster.local
+  port: 5432
+  database: workspace_api
+
+# Lakekeeper warehouse this workspace reads/writes — box convention, same
+# as DuckFlight, Rill and dlt (charts/dlt/values.yaml warehouse).
+warehouse: default
+
+# In-cluster addresses for the two services this process dials that are its
+# OWN (workspace-api 0.21.0). Only ever dialed, never handed to a browser or
+# written into a customer's repo — the dlt and rill charts already reach the
+# same Gitea as http://gitea:3000 (charts/dlt/values.yaml remoteURL), and the
+# rill deploy-shim already reaches the sidecar as http://rill-snapshot:8484.
+#
+# Empty falls back to https://git.<customerDomain> and
+# https://rill-snapshot.<customerDomain>, which is what every box did before
+# this tag and what central still does — so clearing either is the rollback.
+#
+# rill-snapshot only exists while the rill app is enabled, but so does every
+# caller of it (SnapshotServer refuses first when RillEnabled is false), so a
+# rill-less box never dials this address.
+giteaURL: "http://gitea:3000"
+rillSnapshotURL: "http://rill-snapshot:8484"
+
+# Hydration lever (0.4.0+), same shape: the binary defaults it ON, so this
+# only exists as the rollback — false renders `off` and the box then serves
+# whatever its database already holds, importing nothing further. Turning
+# it off does NOT un-import what a previous sweep already loaded.
+importFromRepo: true
+
+# EXTRA browser origins allowed to call this API, appended after the box's
+# own Console origin (console.customer-<slug>.<baseDomain>), which the
+# deployment always allows first — first place is also the Google-OAuth
+# popup's postMessage target. Empty = box origin only, which has been the
+# steady state since the split's Phase 5 deleted the hosted Console's
+# workspace views (no other browser origin talks to this API).
+corsAllowedOrigins: ""
+
+# Where the shared "NYC Taxi Pulse" demo datasets are read from. A plain
+# value, not a Secret — and that is the whole point of it. The data is
+# public-domain NYC TLC data served over an unauthenticated origin, so the
+# box needs nothing delivered to
+# it and the demo pipelines it seeds carry no credential to leak, rotate, or
+# age-encrypt into the customer's own repo.
+#
+# Empty disables the demo loader (the Console hides "Load demo project").
+# A self-hoster points this at their own mirror of the datasets; the objects
+# are addressed by key under nyc-taxi/, and no directory listing is needed
+# or used.
+demoPublicBaseURL: "https://demo-data.fairtier.com"
+
+# Bind Console sessions to the `console` Casdoor app by audience
+# (AUTH_EXPECTED_AUDIENCES). Without it any token this box's Casdoor issues
+# reaches the workspace API — including the ones minted for `rill`,
+# `duckflight` and the dlt-worker, which are handed to other software and
+# have no business carrying a user's product session.
+#
+# Safe to leave on: only the public :8080 mux checks it. The internal :8081
+# mux authenticates the worker through BoxIssuerTrust and is not touched, so
+# turning this on cannot break the dlt poll. False is the rollback if a
+# legitimate caller turns out to hold a different audience.
+enforceConsoleAudience: true
+
+# AI drafting through the FairTier assist relay (0.22.0): the deployment
+# template sets the FAIRTIER_ASSIST_* env (relay URL + the dlt-oidc client
+# pair) so this box drafts with centrally held LLM keys. False is the
+# rollback lever — drafting returns to UNIMPLEMENTED ("coming soon"),
+# nothing else changes.
+assistRelay: true
+
+# At-rest encryption of this box's stored credentials. The key is generated on
+# the box and never leaves it, so a rotation here is the box's own business:
+# add the retired key to the `workspace-api-crypto` Secret as `previous`, set
+# rewrap to "on" for one rollout so every row moves to the new key, confirm,
+# then drop both.
+#
+# Off by default because the stored form gained a key id in workspace-api
+# 0.12.0, and a value written under it cannot be read by an older image — with
+# the rewrap on, a first rollout would convert every row at once and make a
+# rollback a box-wide outage rather than a handful of unreadable rows.
+#
+# The image above is >= 0.12.0 now, so this and the `previous` key on the
+# workspace-api-crypto Secret are live levers rather than inert ones. Leave the
+# rewrap off outside an actual rotation: with it off, only rows the box rewrites
+# after this rollout carry the new envelope, which keeps a rollback to 0.11.0 a
+# handful of unreadable rows instead of the whole table.
+credentialEncryption:
+  rewrap: "off"
+
+# Sized off the same code running centrally: the FairTier API pods serving
+# the whole fleet sit at 23-24Mi RSS with a 32Mi request / 64Mi limit.
+# This box binary serves ONE
+# workspace, so the headroom here is for the startup migration run and the
+# two sweeps. Keep it small on purpose — a VM box runs at ~85% memory
+# requests already, and control-plane starvation there is what turns a big
+# dlt run into a CoreDNS/ArgoCD crashloop cascade.
+resources:
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi

@@ -1,0 +1,250 @@
+# Nightly compaction CronJob. Auth mirrors the dlt-worker StatefulSet
+# (charts/dlt/templates/statefulset.yaml): the box-seeded dlt-worker
+# Casdoor client against the on-box Lakekeeper (writer principal
+# oidc~admin/dlt-worker, granted by the platform worker), and the
+# cloud-init-staged fairtier-storage credentials for direct data-file IO.
+# The token URL is the public auth hostname — boxes hairpin it through
+# Traefik, same as Rill's OAUTH2_SERVER_URI.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iceberg-maintenance
+  labels:
+    app: iceberg-maintenance
+    tier: box
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One retry, then wait for the next night — a compaction that fails
+      # twice in a row needs a human look at the job log, not a hot loop
+      # rewriting customer data.
+      #
+      # Deliberately still 1 after the 2026-08-11 review, even though three
+      # of the six retained runs (08-03, 08-04, 08-09) failed *both* attempts.
+      # More attempts would not have helped: Job backoff is 10s, so attempt 2
+      # lands in the same bad minute as attempt 1, and every extra attempt is
+      # another pass at rewriting customer data — the thing this limit exists
+      # to prevent. The transient is handled before the run instead, by the
+      # wait-for-catalog gate below.
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: iceberg-maintenance
+            tier: box
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            # Why this exists: the failing runs never reached compaction. All
+            # three (2026-08-03, 08-04, 08-09) died in load_catalog(), which
+            # resolves the OIDC token URL and fetches the catalog config
+            # before a single table is touched. The two 08-09 attempts failed
+            # differently — attempt 1 with NameResolutionError on the auth
+            # hostname (CoreDNS was restarting), attempt 2 with Lakekeeper's
+            # 503 AuthorizationBackendError — which is one cause with two
+            # faces: the box's auth path was briefly not there at 01:17.
+            #
+            # A whole night of maintenance was lost to a blip measured in
+            # seconds. Gate the run on auth and the catalog actually
+            # answering, so a transient delays the run instead of skipping it.
+            #
+            # Same image as the main container: no extra pull on a box, and
+            # python is the one interpreter the image is guaranteed to have
+            # (no curl in python:3.12-slim).
+            - name: wait-for-catalog
+              image: {{ .Values.image }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              command: ["python", "-c"]
+              args:
+                - |
+                  import os, sys, time, urllib.error, urllib.request
+                  from urllib.parse import urlsplit
+
+                  deadline = time.monotonic() + float(os.environ["WAIT_TIMEOUT_SECONDS"])
+                  targets = [
+                      ("auth", urlsplit(os.environ["OIDC_TOKEN_URL"])._replace(query="").geturl()),
+                      ("catalog", os.environ["CATALOG_URI"].rstrip("/") + "/v1/config"),
+                  ]
+
+                  def answering(url):
+                      # Any HTTP status proves DNS + TLS + the proxy are up, so
+                      # an unauthenticated 400/401/405 counts as ready — we are
+                      # probing reachability, not credentials. 5xx does NOT:
+                      # Lakekeeper answers 503 AuthorizationBackendError while
+                      # its authz backend is still coming up, which is exactly
+                      # the state that killed the 2026-08-09 retry.
+                      try:
+                          with urllib.request.urlopen(url, timeout=10) as r:
+                              return r.status < 500
+                      except urllib.error.HTTPError as e:
+                          return e.code < 500
+                      except Exception as e:
+                          print(f"  not ready: {e}", flush=True)
+                          return False
+
+                  for name, url in targets:
+                      while not answering(url):
+                          if time.monotonic() >= deadline:
+                              print(f"timed out waiting for {name} at {url}", file=sys.stderr)
+                              sys.exit(1)
+                          time.sleep(10)
+                      print(f"{name} is answering", flush=True)
+              env:
+                - name: CATALOG_URI
+                  value: {{ .Values.catalogURI | quote }}
+                - name: OIDC_TOKEN_URL
+                  value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/api/login/oauth/access_token"
+                - name: WAIT_TIMEOUT_SECONDS
+                  value: {{ .Values.waitTimeoutSeconds | int64 | quote }}
+              # The gate is a sleep loop with one socket open; it must not
+              # reserve anything the nightly run then has to compete for.
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+          containers:
+            - name: compact
+              image: {{ .Values.image }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              # Baked image (values.yaml image) — the compaction/expiry logic
+              # ships inside it; the old runtime `pip install` is gone. The
+              # image ENTRYPOINT is already `python -m iceberg_maintenance`;
+              # spelled out here so the intent is visible in the manifest.
+              # (PYTHONUNBUFFERED is set in the image.)
+              #
+              # This was a `/bin/sh -c` wrapper until image 0.5.0, so that the
+              # freshness heartbeat could be stamped without an image change
+              # (the box-backup pattern, charts/backup). It moved into the
+              # app because the wrapper could only see the exit code, and the
+              # count that matters most here — tables the run could not compact
+              # at all — is deliberately invisible in the exit code. Same three
+              # guarantees, now enforced and tested in the image: only a clean
+              # run writes, the file is renamed into place, and a failed write
+              # does not fail the run. See TEXTFILE_PATH below.
+              command: ["python", "-m", "iceberg_maintenance"]
+              env:
+                # Feeds the central BoxIcebergMaintenanceStale and
+                # BoxIcebergTablesUnsupported alerts via the box Alloy's
+                # node_exporter textfile collector.
+                #
+                # It also carries iceberg_maintenance_orphan_files and
+                # _orphan_bytes — how much object storage nothing references —
+                # which are on the keep-list because a dry-run sweep's whole
+                # output is that number.
+                #
+                # The file also carries iceberg_maintenance_tables_scanned,
+                # which is deliberately NOT on the Alloy keep-list: it is the
+                # denominator, useful when reading the file on the box, and
+                # nothing alerts on it. Its absence centrally is a decision,
+                # not an oversight.
+                - name: TEXTFILE_PATH
+                  value: /textfile/iceberg_maintenance.prom
+                - name: CATALOG_URI
+                  value: {{ .Values.catalogURI | quote }}
+                - name: WAREHOUSE
+                  value: {{ .Values.warehouse | quote }}
+                # The box's dlt-worker Casdoor client — generated on the box
+                # by the casdoor-seed Job; already a Lakekeeper warehouse
+                # writer. Same reuse pattern as box-rill; a dedicated
+                # maintenance client is a worker-side follow-up.
+                - name: OIDC_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: dlt-oidc
+                      key: client-id
+                - name: OIDC_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: dlt-oidc
+                      key: client-secret
+                - name: OIDC_TOKEN_URL
+                  value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/api/login/oauth/access_token"
+                # Direct data-file IO (see direct_s3_io in the image's
+                # maintenance.py) — cloud-init-staged storage credentials,
+                # dlt-worker parity.
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: fairtier-storage
+                      key: s3AccessKeyId
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: fairtier-storage
+                      key: s3SecretAccessKey
+                - name: AWS_ENDPOINT_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: fairtier-storage
+                      key: s3Endpoint
+                - name: AWS_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: fairtier-storage
+                      key: s3Region
+                {{- /* int64 before quote: Helm parses big YAML numbers as
+                     float64 and renders them scientific ("5.36e+08"),
+                     which Python's int() rejects. */}}
+                - name: SMALL_FILE_MAX_BYTES
+                  value: {{ .Values.compaction.smallFileMaxBytes | int64 | quote }}
+                - name: MIN_INPUT_FILES
+                  value: {{ .Values.compaction.minInputFiles | int64 | quote }}
+                {{- /* A float fraction (0.3), not a big int — quote as-is;
+                     the int64 dance above is only for the byte-count knobs. */}}
+                - name: REWRITE_MIN_SMALL_FRACTION
+                  value: {{ .Values.compaction.rewriteMinSmallFraction | quote }}
+                - name: REWRITE_CHUNK_BYTES
+                  value: {{ .Values.compaction.rewriteChunkBytes | int64 | quote }}
+                - name: COMMIT_MAX_ATTEMPTS
+                  value: {{ .Values.compaction.commitMaxAttempts | int64 | quote }}
+                - name: COMMIT_RETRY_BACKOFF_SECONDS
+                  value: {{ .Values.compaction.commitRetryBackoffSeconds | quote }}
+                - name: MAX_SNAPSHOT_AGE_MS
+                  value: {{ .Values.expiry.maxSnapshotAgeMs | int64 | quote }}
+                - name: MIN_SNAPSHOTS_TO_KEEP
+                  value: {{ .Values.expiry.minSnapshotsToKeep | int64 | quote }}
+                # The sweep — off | dry-run | delete. See orphanSweep in
+                # values.yaml for why "delete" is not the shipped default.
+                - name: ORPHAN_SWEEP_MODE
+                  value: {{ .Values.orphanSweep.mode | quote }}
+                - name: ORPHAN_MIN_AGE_SECONDS
+                  value: {{ .Values.orphanSweep.minAgeSeconds | int64 | quote }}
+                - name: ORPHAN_MAX_DELETES
+                  value: {{ .Values.orphanSweep.maxDeletes | int64 | quote }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                # node_exporter textfile dir on the host — the run writes its
+                # freshness heartbeat here for the box Alloy to scrape.
+                - name: textfile
+                  mountPath: /textfile
+          volumes:
+            # Shared with the box Alloy's node_exporter textfile collector and
+            # with box-backup, which already writes its own heartbeat here.
+            # The dir is created world-writable (1777) by cloud-init, so no
+            # legacy-box migration is needed for this — any box new enough to
+            # report BoxBackupStale already has it.
+            - name: textfile
+              hostPath:
+                path: /var/lib/node-exporter/textfile
+                type: DirectoryOrCreate

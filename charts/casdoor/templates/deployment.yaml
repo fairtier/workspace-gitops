@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: casdoor
+  labels:
+    app: casdoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: casdoor
+  template:
+    metadata:
+      labels:
+        app: casdoor
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      # Wait for on-box postgres; the casdoor database itself is created by
+      # the postgres ensure-databases Job (charts/postgres/ensure-databases-job.yaml).
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.initImage }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h postgresql.fairtier-system.svc.cluster.local -U postgres; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: casdoor
+          image: {{ .Values.image }}
+          env:
+            # Casdoor config keys are overridable via same-named env vars;
+            # the full DSN (with password) is written by cloud-init.
+            - name: dataSourceName
+              valueFrom:
+                secretKeyRef:
+                  name: casdoor-conf
+                  key: dataSourceName
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+            - name: init-data
+              mountPath: /init_data.json
+              subPath: init_data.json
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: config
+          configMap:
+            name: casdoor-config
+        - name: init-data
+          secret:
+            # Rendered ON THE BOX by the casdoor-seed Job (templates/
+            # seed-job.yaml) — shape from git, secrets from on-box Secrets.
+            # Pre-rework boxes had this written by cloud-init; the seed
+            # adopts and re-renders it (create-if-absent semantics via
+            # initDataNewOnly=true keep Casdoor's DB untouched).
+            secretName: casdoor-init-data

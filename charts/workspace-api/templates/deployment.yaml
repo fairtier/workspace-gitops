@@ -1,0 +1,350 @@
+# The workspace plane, box-local. Single replica: it hosts the adopt +
+# stuck-run sweeps in-process (there is deliberately no box worker), and the
+# box serves one customer.
+#
+# Two muxes, deliberately different exposure:
+#   :8080 public  — the Console's product RPCs, Ingress-published, box
+#                   Casdoor JWT required.
+#   :8081 internal — the local dlt-worker's poll + run reporting. Service
+#                   only, never in the Ingress. Publishing it would expose
+#                   the worker RPCs (source credentials, run forging) to
+#                   the internet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-api
+  labels:
+    app: workspace-api
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workspace-api
+  strategy:
+    # The sweeps and the migration run at startup; one process at a time
+    # keeps two of them from racing over the same rows during a roll.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: workspace-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: workspace-api
+          image: {{ .Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # --- Tenancy (workspace.StaticResolver) --------------------
+            # No customers table on the box: the one workspace it serves is
+            # configuration. The Casdoor org and issuer are told to the box
+            # rather than derived from the domain — that "customer-<slug>"
+            # naming belongs to the control plane, which creates it.
+            - name: WORKSPACE_SLUG
+              value: {{ .Values.slug | quote }}
+            - name: WORKSPACE_CUSTOMER_DOMAIN
+              value: "customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+            # BARE slug: the box Casdoor org is created as `{{ .Values.slug }}`
+            # by charts/casdoor/templates/seed-template-configmap.yaml. The
+            # "customer-" prefix belongs to the DOMAIN, and to the CENTRAL
+            # Casdoor's org naming — not to this one.
+            # This said "customer-<slug>" until Phase 3C, which pointed
+            # LakekeeperUserService's AddApp/DeleteApp/ListApps at an org that
+            # does not exist on the box: Service Accounts returned nothing for
+            # every VM customer. Same confusion the audience-sync CronJob
+            # documents biting the canary box on 2026-07-20.
+            - name: WORKSPACE_CASDOOR_ORG
+              value: {{ .Values.slug | quote }}
+            - name: WORKSPACE_CASDOOR_ISSUER
+              value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+            # Fetch keys in-cluster (pod → own node hairpin is the recorded
+            # boot-flake shape for the public auth hostname), while the
+            # trusted issuer above stays the public origin Casdoor stamps
+            # into every token. Same split rill and duckflight use.
+            - name: AUTH_JWKS_URL
+              value: "http://casdoor:8000/.well-known/jwks"
+            - name: WORKSPACE_LAKEKEEPER_WAREHOUSE
+              value: {{ .Values.warehouse | quote }}
+            # Lakekeeper/DuckFlight URLs are left at their defaults
+            # (https://<service>.<customerDomain>): they are handed to
+            # customers as connection strings, so they must be the public
+            # ones — same values central serves today.
+            #
+            # These two are the opposite case and that is the whole reason
+            # they exist as separate variables: nothing publishes them, this
+            # process is the only thing that dials them, and both are its own
+            # services one hop away. Going out to the public hostname made the
+            # adopt and hydration sweeps — which run at process START — depend
+            # on the node hairpin and on git.<domain>'s Let's Encrypt
+            # certificate being issued. Same split as AUTH_JWKS_URL above.
+            {{- if .Values.giteaURL }}
+            - name: WORKSPACE_GITEA_URL
+              value: {{ .Values.giteaURL | quote }}
+            {{- end }}
+            {{- if .Values.rillSnapshotURL }}
+            - name: WORKSPACE_RILL_SNAPSHOT_URL
+              value: {{ .Values.rillSnapshotURL | quote }}
+            {{- end }}
+
+            # --- Console sign-in (Phase 3C) -----------------------------
+            # The box Casdoor app the Console authenticates with, minted by
+            # the seed Job. Advertised unauthenticated at
+            # /.well-known/fairtier-workspace: a browser cannot present a
+            # token until it knows which issuer and client to ask, and only
+            # this box knows. A PKCE public-client id is public by design,
+            # so the id — never the secret — is what goes in the document.
+            - name: WORKSPACE_CONSOLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: client-id
+            {{- if .Values.enforceConsoleAudience }}
+            # Refuse tokens minted for this box's OTHER Casdoor apps (rill,
+            # duckflight, the dlt-worker). Same issuer, same org, same user —
+            # only the audience separates a Console session from a token
+            # handed to different software. Public mux only.
+            - name: AUTH_EXPECTED_AUDIENCES
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: client-id
+            {{- end }}
+
+            # --- Box-local "Sign in with Google" (0.16.0) ----------------
+            # The consent flow terminates on THIS box: a cut-over tenant
+            # cannot use central's (the write freeze refuses the grant
+            # redemption), and the redirect URI is per-host, so the customer
+            # registers this exact URL in their own Google app — the
+            # Integrations card shows it to them via GetOAuthClient.
+            - name: GOOGLE_OAUTH_REDIRECT_URL
+              value: "https://api.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/oauth/google/callback"
+            # HMAC key for the OAuth state parameter. Generated on the box by
+            # the seed Job (same pattern as workspace-api-crypto): it only
+            # signs THIS box's consent round-trips, so it has no central copy
+            # and no cross-box meaning. Losing it costs nothing durable — a
+            # state signed before a regeneration just fails verification and
+            # the user clicks Connect again.
+            - name: GOOGLE_OAUTH_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: workspace-api-oauth-state
+                  key: state-secret
+
+            {{- if .Values.assistRelay }}
+            # --- AI drafting via the FairTier assist relay (0.22.0) ------
+            # No LLM provider key on the box, ever: the box prepares the draft
+            # prompt and relays the completion to central
+            # (assistrelay.v1 at worker-api.<baseDomain>), authenticated with
+            # a client-credentials token from its OWN Casdoor — the same
+            # channel and the same dlt-oidc client the box-secrets sync uses.
+            # In-cluster token URL, public issuer stamped into the token —
+            # same split and same hairpin rationale as AUTH_JWKS_URL above.
+            # A self-hoster instead sets their own provider key
+            # (DEEPSEEK_/ANTHROPIC_/LLM_*), which always wins over these.
+            # secretKeyRef optional: before casdoor-seed has minted dlt-oidc
+            # the env is incomplete and drafting simply stays UNIMPLEMENTED.
+            - name: FAIRTIER_ASSIST_URL
+              value: "https://worker-api.{{ .Values.baseDomain }}"
+            - name: FAIRTIER_ASSIST_TOKEN_URL
+              value: "http://casdoor:8000/api/login/oauth/access_token"
+            - name: FAIRTIER_ASSIST_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dlt-oidc
+                  key: client-id
+                  optional: true
+            - name: FAIRTIER_ASSIST_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dlt-oidc
+                  key: client-secret
+                  optional: true
+            {{- end }}
+
+            # --- Box Postgres ------------------------------------------
+            # PGPASSWORD must precede PG_DSN so the k8s $(VAR) interpolation
+            # keeps the password out of the rendered manifest (no plaintext
+            # secret in git).
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  # Written by cloud-init into fairtier-system.
+                  name: postgres-credentials
+                  key: postgres-password
+            - name: PG_DSN
+              value: "postgres://postgres:$(PGPASSWORD)@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}?sslmode=disable"
+            # At-rest encryption for source/git credentials stored in the
+            # box database, and the HMAC key for credential fingerprints.
+            # Generated on the box by the seed Job; never leaves it.
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: workspace-api-crypto
+                  key: key
+            # A box's key is its own, so a box rotates independently of central
+            # and of every other box: add the retired key here as `previous`,
+            # turn the rewrap on for one rollout, then drop it. Optional — the
+            # Secret carries no `previous` until someone starts a rotation.
+            - name: CREDENTIAL_ENCRYPTION_KEYS_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: workspace-api-crypto
+                  key: previous
+                  optional: true
+            - name: CREDENTIAL_ENCRYPTION_REWRAP
+              value: {{ .Values.credentialEncryption.rewrap | default "off" | quote }}
+
+            # --- Box repo credentials (workspace.StaticBoxCredentials) --
+            # Read locally, and since Phase 3E read ONLY locally: central's
+            # copies and the deposits that filled them are gone.
+            # These are minted by the rill seed Job (platform-git,
+            # rill-snapshot-auth) and the dlt seed Job (dlt-age), so on a
+            # first boot this pod waits for them — kubelet retries and the
+            # pod starts as soon as they exist.
+            - name: BOX_GIT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: platform-git
+                  key: username
+            - name: BOX_GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: platform-git
+                  key: token
+            - name: BOX_SNAPSHOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rill-snapshot-auth
+                  key: token
+            # Public half only — the private age identity stays in Secret
+            # dlt-age, readable by the dlt-worker alone.
+            - name: BOX_AGE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dlt-age
+                  key: public-key
+
+            # --- Workspace service credentials -------------------------
+            # The centrally-known Casdoor client (casdoor seed): used to
+            # mint Lakekeeper service accounts through the box Casdoor's
+            # admin API, exactly as central does for VM boxes.
+            - name: WORKSPACE_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakekeeper-oidc
+                  key: client-id
+            - name: WORKSPACE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lakekeeper-oidc
+                  key: client-secret
+            - name: WORKSPACE_DUCKFLIGHT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  # cloud-init; single token, same value central holds.
+                  name: duckflight-auth-secrets
+                  key: auth-tokens
+
+            # --- Customer bucket (file drop) ---------------------------
+            - name: WORKSPACE_S3_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: fairtier-storage
+                  key: s3Bucket
+            - name: WORKSPACE_S3_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: fairtier-storage
+                  key: s3Endpoint
+            - name: WORKSPACE_S3_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: fairtier-storage
+                  key: s3Region
+            - name: WORKSPACE_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: fairtier-storage
+                  key: s3AccessKeyId
+            - name: WORKSPACE_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fairtier-storage
+                  key: s3SecretAccessKey
+
+            {{- if .Values.demoPublicBaseURL }}
+            # --- Starter demo datasets ---------------------------------
+            # Public origin, so this is a value and not a secretKeyRef:
+            # nothing has to be delivered to this box for the demo to work,
+            # and the pipelines it seeds carry no credential at all.
+            - name: DEMO_PUBLIC_BASE_URL
+              value: {{ .Values.demoPublicBaseURL | quote }}
+            {{- end }}
+
+            # --- Levers -------------------------------------------------
+            # PIPELINES_GIT_PRIMARY / TRANSFORMATIONS_GIT_PRIMARY used to sit
+            # here. The Phase 2.5 cleanup retired them along with the legacy
+            # row-is-truth save path: the box repo is the source of truth
+            # unconditionally, and the binary ignores both vars.
+            {{- if not .Values.importFromRepo }}
+            - name: WORKSPACE_IMPORT_FROM_REPO
+              value: "off"
+            {{- end }}
+            # The box's own Console origin always leads the list. Order is
+            # load-bearing: the FIRST origin is also where the Google OAuth
+            # popup postMessages its result (firstCORSOrigin →
+            # renderOAuthResult), so Connect-Google completes on the box
+            # Console and not on the hosted one — the transitional cost of
+            # the Console split, accepted because the hosted workspace views
+            # are on the deletion path. corsAllowedOrigins keeps the hosted
+            # Console's RPCs working meanwhile; empty leaves just the box.
+            - name: CORS_ALLOWED_ORIGINS
+              {{- $boxOrigin := printf "https://console.customer-%s.%s" .Values.slug .Values.baseDomain }}
+              {{- if .Values.corsAllowedOrigins }}
+              value: {{ printf "%s,%s" $boxOrigin .Values.corsAllowedOrigins | quote }}
+              {{- else }}
+              value: {{ $boxOrigin | quote }}
+              {{- end }}
+            # Tracing is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set;
+            # the box Alloy drops traces in v1, so it stays unset.
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8081
+              name: internal
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            # /readyz pings the database — the pod leaves the Service when
+            # box Postgres is down instead of serving 500s.
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          startupProbe:
+            # First boot runs the whole migration set before serving.
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 60

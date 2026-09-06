@@ -1,0 +1,40 @@
+# GitOps ownership of the box's ArgoCD install (see charts/argocd/) —
+# adopts the cloud-init-written HelmChart CR so ArgoCD upgrades are day-2
+# fleet rollouts.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/name: argocd
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/argocd
+    helm:
+      releaseName: argocd
+      parameters:
+        - name: argocdChartVersion
+          value: "{{ .Values.argocdChartVersion }}"
+  destination:
+    server: https://kubernetes.default.svc
+    # The HelmChart CR lives where the k3s helm-controller watches.
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

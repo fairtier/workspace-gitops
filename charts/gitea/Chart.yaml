@@ -1,0 +1,12 @@
+apiVersion: v2
+name: box-gitea
+description: >-
+  Per-box Gitea git server — hosts the customer's transformation (dbt)
+  repos so "I don't have git" never blocks onboarding
+  (FABLE_PRODUCT_REVIEW.md §3, "Hosted" mode). Per-customer state (admin
+  password, SECRET_KEY, Casdoor OIDC client) is GENERATED ON THE BOX by
+  the seed Job — nothing here depends on cloud-init, so the app converges
+  on already-provisioned boxes too (day-2 rule in ARCHITECTURE.md).
+type: application
+version: 0.1.0
+appVersion: "1.26.4"

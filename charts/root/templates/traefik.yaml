@@ -1,0 +1,45 @@
+# Resource requests for the k3s-bundled Traefik (charts/traefik). Wave -1:
+# this only merges values into a release k3s already installed, so it does not
+# gate anything — but landing it before the workload waves means the ingress
+# is out of BestEffort before the apps that can generate pressure start.
+#
+# prune is deliberately DISABLED here. Everything else in this repo may be
+# pruned safely because ArgoCD created it; this Application adopts a
+# HelmChartConfig for a release k3s owns. If the app is ever removed or
+# renamed, pruning would delete the config out from under the running Traefik
+# and trigger a helm upgrade of the box's ingress as a side effect of a repo
+# edit. Removing the override should be an explicit values change, not a
+# consequence of deleting a file.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    app.kubernetes.io/name: traefik
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/traefik
+    helm:
+      releaseName: traefik-config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

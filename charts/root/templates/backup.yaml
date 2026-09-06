@@ -1,0 +1,45 @@
+# Per-box nightly backup CronJob — pg_dump of the box Postgres + tar of the
+# Gitea PVCs → the customer's own bucket (the "Backups" floor item of the
+# dedicated-VM plan). Wave 3: the CronJob mounts Gitea's PVCs,
+# which exist once gitea (2) has synced — soft ordering anyway, it only
+# matters at the nightly run time.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backup
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app.kubernetes.io/name: backup
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/backup
+    helm:
+      releaseName: backup
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

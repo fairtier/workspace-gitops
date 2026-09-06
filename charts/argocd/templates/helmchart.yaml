@@ -1,0 +1,28 @@
+# Adopts the ArgoCD HelmChart CR that cloud-init wrote at first boot, so
+# bumping argocdChartVersion (charts/root/values.yaml) upgrades ArgoCD on
+# every box via the k3s helm-controller: no cloud-init edit, no
+# re-provisioning.
+#
+# NO valuesContent here on purpose — the release's values live in
+# helmchartconfig.yaml, which the helm-controller merges OVER whatever this
+# CR carries. That is what makes them immune to the frozen cloud-init copy
+# of this manifest being re-applied at every k3s start; the full mechanism
+# is documented in that file. Note the asymmetry it leaves behind: `version`
+# is a spec field, not values, so on a box whose cloud-init manifest has not
+# been retired yet (charts/bootstrap-retire/) a chart bump applied here
+# reverts to the provisioning-day version at the next k3s start.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: argo-cd
+  namespace: kube-system
+  annotations:
+    # After the HelmChartConfig (wave -1): on a legacy box this apply is what
+    # removes the frozen values from the live CR, and the config has to be in
+    # place first or the release renders with chart defaults in between.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  repo: https://argoproj.github.io/argo-helm
+  chart: argo-cd
+  version: "{{ required "argocdChartVersion is required" .Values.argocdChartVersion }}"
+  targetNamespace: argocd

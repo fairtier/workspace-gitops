@@ -1,0 +1,141 @@
+# Values for the UPSTREAM betterstackhq/collector chart (pinned via
+# betterstackCollectorChartVersion in charts/root/values.yaml). Static by
+# design, like charts/observability/values.yaml: a $values file cannot be
+# templated, and nothing here is per-box — the one per-box thing, the
+# collector's secret, arrives as a Secret through box-secrets rather than as a
+# value.
+#
+# ============================================================================
+# THIS IS NOT DEPLOYED. Read before turning it on.
+# ============================================================================
+#
+# The Application that would install this is gated off
+# (`betterstackCollectorEnabled: false`, charts/root/values.yaml). What
+# follows is the sizing argument for why, and the specific number that would
+# settle it.
+#
+# ## What it would buy
+#
+# A box runs software nobody instrumented: the customer's dbt models and dlt
+# pipelines, Rill, Lakekeeper, DuckFlight, Postgres. When one of them is slow
+# we have node metrics and pod logs and nothing in between — no per-service
+# latency, no error rate, no map of what calls what. eBPF produces that layer
+# without anyone instrumenting anything, which is a larger gap on a box than it
+# is centrally.
+#
+# ## Why it is off
+#
+# The two containers request ~2 GiB between them. Against that:
+#
+#   - a cx-class box is a ~3.7 GB machine.
+#   - k3s itself costs ~1.1 GiB against a 768Mi `kube-reserved`, so
+#     `allocatable` overstates what is actually free
+#     (the 2026-08-13 box-livelock incident).
+#   - such a box sits at 18-20 % headroom AT REST, and one has already spent 110
+#     minutes livelocked — degrading into probe timeouts with no OOM kill of
+#     any kind to point at afterwards.
+#   - k3s ships the kubelet with NO memory eviction signal, so a box under
+#     memory pressure does not shed load. It thrashes until CoreDNS fails its probes.
+#
+# A 2 GiB privileged DaemonSet there is not a tight fit, it is that incident
+# scheduled deliberately.
+#
+# ## The number that would change the answer
+#
+# The vendor documents a ~2 GiB startup spike settling to 200-500MiB. If that
+# holds, the eBPF request drops by roughly 1 GiB and this becomes a real option
+# on cpx32-class boxes (4 vCPU / 8 GB, today's default VM size) —
+# though still not on a cx-class one.
+#
+# Measuring it is what the central deployment of this agent is for: same
+# agent, same components, on a central node with room, reporting into a
+# Prometheus we already run. Read
+# `container_memory_working_set_bytes{container="ebpf"}` there before editing
+# the requests below.
+#
+# ## And the order, when it does
+#
+#   1. `betterstack_collector_enabled = true` on the tenant root (worker env
+#      BETTERSTACK_COLLECTOR_ENABLED) — mints the collector, publishes the
+#      secret.
+#   2. Confirm Secret `betterstack-collector` exists in `observability` on the
+#      target box. box-secrets syncs every 15 minutes.
+#   3. Only then `betterstackCollectorEnabled: true`, rolled out the normal
+#      way (canary box first, verify, then the rest — ARCHITECTURE.md).
+#
+# Flipping 3 before 1 gives a DaemonSet that cannot authenticate. Same lesson,
+# same ordering, as the telemetry Secret in charts/box-secrets/values.yaml.
+
+collector:
+  image:
+    # Digest-pinned, not `latest`. The chart ships tag `latest` with
+    # pullPolicy Always for both containers — a privileged, hostPID,
+    # hostNetwork DaemonSet re-resolving a mutable tag on every pod start, on a
+    # machine belonging to a customer. That is the weakest supply-chain
+    # guarantee of anything on the box attached to the most trusted workload on
+    # it, and the repo's "no :latest" rule applies harder here than to our own
+    # images. Resolved 2026-08-16; upgrading is a visible commit.
+    digest: "sha256:a8ad253c753e46aefe1d8e34999603018b23a6906fc35622f1fb05efd382f1f9"
+    pullPolicy: IfNotPresent
+
+  # COLLECTOR_SECRET comes from the Secret box-secrets writes, never from a
+  # value. The chart skips any env entry whose value is empty, which is what
+  # lets envFrom supply it — setting `collector.env.COLLECTOR_SECRET` here
+  # would render an explicit env var that WINS over envFrom, and would also put
+  # the credential in git.
+  envFrom:
+    - secretRef:
+        name: betterstack-collector
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+
+# Left empty deliberately. A non-empty value makes the collector claim 4317 and
+# 4318 as HOST ports, and Alloy is already the box's OTLP receiver on 4317 —
+# DuckFlight's exporter points at alloy.observability.svc.cluster.local:4317
+# (charts/duckflight/values.yaml). Two receivers would mean two partial trace
+# streams, not one complete one.
+collectOtel:
+  grpcPort: ""
+  httpPort: ""
+
+ebpf:
+  enabled: true
+
+  image:
+    digest: "sha256:e044472c6b6e01b7da7a0e1ebde47ee8441b14e2c285dbbfc1f5b4c21ab28ef4"
+    pullPolicy: IfNotPresent
+
+  # The container the whole sizing argument above is about.
+  #
+  # These are BELOW the chart defaults (200m/1536Mi request, 1000m/2Gi limit),
+  # set against the vendor's own settled-state figure rather than its startup
+  # spike, because the chart's request is sized for a node that has a spare
+  # 4 GiB and a box does not. GOMEMLIMIT is lowered to match: the agent is
+  # written to respect it, and leaving it at 900MiB under a 1Gi limit would
+  # make the limit the thing that fires.
+  #
+  # Do not raise these to "make it fit" — that is backwards. If the agent needs
+  # more than this on a box, it does not belong on a box, and the honest
+  # response is to leave this gated off. See
+  # feedback_oom_is_a_bug_not_a_small_box.
+  env:
+    GOMEMLIMIT: 700MiB
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 640Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # The agent restarts itself above this rather than waiting for the kernel.
+  # Below the 1Gi limit on purpose: a self-restart is a clean exit that keeps
+  # its own logs, a memcg kill is a 137 with nothing to read afterwards.
+  memoryRestartThreshold: 900

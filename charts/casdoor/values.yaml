@@ -1,0 +1,101 @@
+# slug + baseDomain are injected by the app-of-apps
+# (charts/root/templates/casdoor.yaml); placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+# Image pin mirrors the central Casdoor. No :latest.
+image: casbin/casdoor:3.153.0
+initImage: postgres:17-alpine
+# kubectl + curl + jq + bash for the seed Job (same pin as gitea/values.yaml).
+seedImage: alpine/k8s:1.33.13
+
+# Request tracks measured usage (~27Mi / 3m steady), with headroom for login
+# bursts — kept above openfga's because this is the interactive sign-in path
+# and a slow Casdoor is a user staring at a spinner. See the net-neutral
+# sizing rule in charts/argocd/templates/helmchartconfig.yaml before raising it:
+# requests here are a claim on scheduling headroom the box does not have.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Casdoor applications seeded through init_data.json — RENDERED ON THE BOX by
+# the casdoor-seed Job (templates/seed-job.yaml) from this list, so adding or
+# changing an entry is a normal fleet rollout (day-2 safe; `initDataNewOnly =
+# true` in app.conf makes Casdoor treat init_data as create-if-absent).
+#
+# CONTRACT: `name` is the Casdoor application base name and therefore the
+# Lakekeeper principal "oidc~admin/<name>" the FairTier API's worker grants
+# roles to (lakekeeperPrincipal(), pinned by
+# TestBoxSeedsCasdoorAppsForLakekeeperPrincipals which parses THIS file).
+#
+# Per entry:
+#   host/callbackPath  → redirectUris: https://<host>.customer-<slug>.<baseDomain><callbackPath>
+#   credentialsSecret  → Secret (keys client-id/client-secret) the seed reads
+#                        the OIDC client pair from
+#   generated          → true: the seed creates the secret on the box if
+#                        absent (box-local credential). false: the credential
+#                        is CENTRAL (worker/Console use it) — it must be
+#                        delivered at provision time (cloud-init) and the
+#                        seed fails hard if it is missing.
+initDataApplications:
+  - name: lakekeeper
+    displayName: Lakekeeper
+    description: Lakekeeper Iceberg catalog
+    host: lakekeeper
+    callbackPath: /callback
+    grantTypes: ["client_credentials", "password", "authorization_code"]
+    enablePassword: true
+    credentialsSecret: lakekeeper-oidc
+    generated: false
+  - name: web
+    displayName: Web
+    description: Browser-based OIDC for customer services
+    host: web
+    callbackPath: /oauth2/callback
+    grantTypes: ["authorization_code"]
+    enablePassword: true
+    credentialsSecret: web-oidc
+    generated: true
+  - name: duckflight
+    displayName: DuckFlight
+    description: DuckFlight FlightSQL server
+    host: duckflight
+    callbackPath: /oauth2/callback
+    grantTypes: ["client_credentials"]
+    enablePassword: false
+    credentialsSecret: duckflight-iceberg-secrets
+    generated: true
+  # dlt-worker (charts/dlt) uses ONE client-credentials pair for both the
+  # on-box Lakekeeper catalog (writer principal oidc~admin/dlt-worker,
+  # granted by the platform worker) and the central FairTier API
+  # (worker-api.<baseDomain> — the FairTier API trusts this box's issuer and
+  # binds the tenant from the issuer host). No browser flow; the host is a
+  # redirectUris placeholder only.
+  - name: dlt-worker
+    displayName: dlt worker
+    description: dlt ingestion worker
+    host: dlt-worker
+    callbackPath: /oauth2/callback
+    grantTypes: ["client_credentials"]
+    enablePassword: false
+    credentialsSecret: dlt-oidc
+    generated: true
+  # Rill's own catalog identity (writer principal oidc~admin/rill-iceberg,
+  # granted by the platform worker) — NOT the `rill` authorization_code app
+  # the rill-seed Job creates for the oauth2-proxy login gate. Ends Rill
+  # riding duckflight-iceberg-secrets; charts/rill switches to this secret
+  # via its icebergSecretsName value once the grant is live.
+  - name: rill-iceberg
+    displayName: Rill (Iceberg catalog)
+    description: Rill DuckDB-Iceberg catalog client
+    host: rill
+    callbackPath: /oauth2/callback
+    grantTypes: ["client_credentials"]
+    enablePassword: false
+    credentialsSecret: rill-iceberg-secrets
+    generated: true

@@ -1,0 +1,426 @@
+# Box-local seeding — the day-2-safe alternative to cloud-init secrets
+# (ARCHITECTURE.md, "Day-2 changes"): Rill's OIDC client + oauth2-proxy
+# cookie secret are GENERATED ON THE BOX, and the Casdoor application is
+# created through the Casdoor API, so this app converges identically on
+# new AND already-provisioned boxes. Same pattern (and caveats) as
+# charts/gitea/templates/seed-job.yaml.
+#
+# Wave -1 Sync hook: runs before the wave-0 oauth2-proxy Deployment that
+# consumes rill-oidc; RBAC sits at wave -2. All steps are idempotent:
+#   1. create Secret rill-oidc if absent (client pair, cookie secret);
+#   2. create Casdoor application `rill` if absent, authenticated with the
+#      `web` application's client credentials from casdoor-init-data, and
+#      ensure it carries the callbacks for BOTH Rill hostnames (edit +
+#      dashboards viewer) — the ensure step is what converges
+#      already-provisioned boxes;
+#   3. create the Gitea repo `rill` + seed README/.gitignore if absent,
+#      and mint the sidecar access token into Secret rill-git if absent
+#      (Gitea admin credentials from gitea-secrets);
+#   4. mint the platform-editor token into Secret platform-git if absent —
+#      the box workspace-api's BOX_GIT_TOKEN;
+#   5. mint the snapshot-sidecar bearer into Secret rill-snapshot-auth if
+#      absent — what gates the published rill-snapshot endpoint
+#      (ingressroute-snapshot.yaml).
+#
+# Neither is deposited to central any more: split Phase 3E retired the three
+# repo-writing deposits, because the box serves its own workspace plane and is
+# the only consumer of both secrets.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rill-seed
+  labels:
+    app: rill-seed
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: rill-seed
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: rill-seed
+      containers:
+        - name: seed
+          image: {{ .Values.seedImage }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              # Finite read (dd, busybox-safe) — an unbounded
+              # `tr </dev/urandom | head` dies with SIGPIPE, which pipefail
+              # can turn into a Job failure. 1024 raw bytes keep ~248 alnum
+              # chars.
+              rand() { dd if=/dev/urandom bs=1024 count=1 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c "$1"; }
+              randhex() { dd if=/dev/urandom bs=1024 count=1 2>/dev/null | tr -dc 'a-f0-9' | head -c "$1"; }
+
+              # Absent-vs-forbidden matters (dlt-seed precedent, bitten here
+              # too: rill-snapshot-auth missing from the seed Role's
+              # resourceNames made the get Forbidden, the "absent" branch
+              # created the secret, the read-back died, and every retry
+              # crashed on AlreadyExists). Only NotFound may take the
+              # create path.
+              secret_absent() {
+                out=$(kubectl get secret "$1" 2>&1 >/dev/null) && return 1
+                echo "$out" | grep -qi "notfound" && return 0
+                echo "secret get $1 failed (not NotFound): $out" >&2
+                exit 1
+              }
+
+              # --- 1. rill-oidc: create-if-absent ------------------------
+              # cookie-secret: oauth2-proxy requires 16/24/32 bytes (AES);
+              # 32 alnum chars = 32 bytes.
+              if ! secret_absent rill-oidc; then
+                echo "rill-oidc already exists"
+              else
+                kubectl create secret generic rill-oidc \
+                  --from-literal=oidc-client-id="$(randhex 20)" \
+                  --from-literal=oidc-client-secret="$(rand 40)" \
+                  --from-literal=cookie-secret="$(rand 32)"
+              fi
+
+              # Read back — a pre-existing secret's values are the truth.
+              CLIENT_ID=$(kubectl get secret rill-oidc -o jsonpath='{.data.oidc-client-id}' | base64 -d)
+              CLIENT_SECRET=$(kubectl get secret rill-oidc -o jsonpath='{.data.oidc-client-secret}' | base64 -d)
+
+              # --- 2. Casdoor application: create-if-absent --------------
+              CASDOOR="https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+              API_ID=$(jq -r '.applications[] | select(.name == "web") | .clientId' /casdoor-init/init_data.json)
+              API_SECRET=$(jq -r '.applications[] | select(.name == "web") | .clientSecret' /casdoor-init/init_data.json)
+
+              i=0
+              until curl -sf "$CASDOOR/api/health" >/dev/null || [ "$i" -ge 60 ]; do
+                echo "Waiting for Casdoor..."
+                i=$((i + 1))
+                sleep 5
+              done
+
+              # Both Rill hostnames authenticate against the ONE `rill`
+              # application: rill. (edit) and dashboards. (read-only viewer,
+              # oauth2-proxy-viewer.yaml).
+              EDIT_REDIRECT="https://rill.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/oauth2/callback"
+              VIEWER_REDIRECT="https://dashboards.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/oauth2/callback"
+
+              existing=$(curl -sf -u "$API_ID:$API_SECRET" \
+                "$CASDOOR/api/get-application?id=admin/rill" | jq -r '.data')
+              if [ "$existing" != "null" ]; then
+                echo "Casdoor application rill already exists"
+              else
+                # Shape mirrors the casdoor-seed-rendered applications
+                # (charts/casdoor/templates/seed-template-configmap.yaml).
+                body=$(jq -n \
+                  --arg org "{{ .Values.slug }}" \
+                  --arg name "$CUSTOMER_NAME" \
+                  --arg clientId "$CLIENT_ID" \
+                  --arg clientSecret "$CLIENT_SECRET" \
+                  --arg redirect "$EDIT_REDIRECT" \
+                  --arg viewerRedirect "$VIEWER_REDIRECT" \
+                  '{
+                    owner: "admin",
+                    name: "rill",
+                    displayName: ("Rill - " + $name),
+                    description: ("Rill BI dashboards for " + $name),
+                    organization: $org,
+                    cert: ("cert-" + $org),
+                    clientId: $clientId,
+                    clientSecret: $clientSecret,
+                    enablePassword: true,
+                    enableSignUp: false,
+                    grantTypes: ["authorization_code"],
+                    redirectUris: [$redirect, $viewerRedirect],
+                    tokenFormat: "JWT-Standard",
+                    expireInHours: 168,
+                    refreshExpireInHours: 336
+                  }')
+                resp=$(curl -sf -u "$API_ID:$API_SECRET" \
+                  -H "Content-Type: application/json" \
+                  -d "$body" \
+                  "$CASDOOR/api/add-application")
+                status=$(echo "$resp" | jq -r '.status')
+                if [ "$status" != "ok" ]; then
+                  echo "add-application failed: $resp" >&2
+                  exit 1
+                fi
+                echo "Casdoor application rill created"
+              fi
+
+              # Ensure-redirect: the create path above only ever runs once,
+              # so a box provisioned before the viewer existed needs the
+              # dashboards. callback appended to its live application.
+              # clientSecret is re-stamped from rill-oidc on purpose —
+              # Casdoor masks secrets ("***") on reads, and writing the
+              # mask back would break the client.
+              app=$(curl -sf -u "$API_ID:$API_SECRET" \
+                "$CASDOOR/api/get-application?id=admin/rill" | jq -r '.data')
+              if [ "$(echo "$app" | jq --arg u "$VIEWER_REDIRECT" '.redirectUris | index($u)')" != "null" ]; then
+                echo "viewer redirect URI already registered"
+              else
+                body=$(echo "$app" | jq \
+                  --arg u "$VIEWER_REDIRECT" \
+                  --arg clientSecret "$CLIENT_SECRET" \
+                  '.redirectUris += [$u] | .clientSecret = $clientSecret')
+                resp=$(curl -sf -u "$API_ID:$API_SECRET" \
+                  -H "Content-Type: application/json" \
+                  -d "$body" \
+                  "$CASDOOR/api/update-application?id=admin/rill")
+                status=$(echo "$resp" | jq -r '.status')
+                if [ "$status" != "ok" ]; then
+                  echo "update-application failed: $resp" >&2
+                  exit 1
+                fi
+                echo "viewer redirect URI registered"
+              fi
+
+              # Ensure-tokenFormat: Casdoor's "JWT" format embeds the whole
+              # user object, yielding a ~2-3KB access token and a >4KB
+              # oauth2-proxy session cookie (split into _0/_1). That exceeds
+              # Firefox's 4KB HPACK table, so Firefox re-sends the full cookie
+              # on every concurrent HTTP/2 stream and mishandles Rill's burst
+              # of SPA requests (NS_BINDING_ABORTED, retried on a fresh conn;
+              # "connection was not secure"). Chrome tolerates it. "JWT-Standard"
+              # keeps only standard OIDC claims (sub/email/name) — all
+              # oauth2-proxy needs — dropping the cookie under 4KB. Idempotent:
+              # only writes when drifted. clientSecret is re-stamped for the
+              # same masking reason as the redirect ensure above.
+              app=$(curl -sf -u "$API_ID:$API_SECRET" \
+                "$CASDOOR/api/get-application?id=admin/rill" | jq -r '.data')
+              if [ "$(echo "$app" | jq -r '.tokenFormat')" = "JWT-Standard" ]; then
+                echo "rill tokenFormat already JWT-Standard"
+              else
+                body=$(echo "$app" | jq \
+                  --arg clientSecret "$CLIENT_SECRET" \
+                  '.tokenFormat = "JWT-Standard" | .clientSecret = $clientSecret')
+                resp=$(curl -sf -u "$API_ID:$API_SECRET" \
+                  -H "Content-Type: application/json" \
+                  -d "$body" \
+                  "$CASDOOR/api/update-application?id=admin/rill")
+                status=$(echo "$resp" | jq -r '.status')
+                if [ "$status" != "ok" ]; then
+                  echo "tokenFormat update failed: $resp" >&2
+                  exit 1
+                fi
+                echo "rill tokenFormat set to JWT-Standard"
+              fi
+
+              # --- 3. Gitea: rill repo + sidecar token --------------------
+              # The customer's Rill project content lives in a private repo
+              # under the fixed Gitea admin (charts/gitea seed). The
+              # snapshot sidecar clones/pushes it with a scoped access
+              # token stored in Secret rill-git (create-if-absent — Gitea
+              # tokens cannot be read back).
+              GITEA=http://gitea:3000
+
+              i=0
+              until curl -sf "$GITEA/api/healthz" >/dev/null || [ "$i" -ge 60 ]; do
+                echo "Waiting for Gitea..."
+                i=$((i + 1))
+                sleep 5
+              done
+              curl -sf "$GITEA/api/healthz" >/dev/null
+
+              # gitea-secrets exists once Gitea is healthy (its StatefulSet
+              # consumes it), so read AFTER the wait.
+              GITEA_USER=$(kubectl get secret gitea-secrets -o jsonpath='{.data.admin-username}' | base64 -d)
+              GITEA_PASS=$(kubectl get secret gitea-secrets -o jsonpath='{.data.admin-password}' | base64 -d)
+
+              if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/rill" >/dev/null; then
+                echo "Gitea repo rill already exists"
+              else
+                curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"rill","private":true,"default_branch":"main","auto_init":false,"description":"Rill BI project - dashboards and models, synced from the box"}' \
+                  "$GITEA/api/v1/user/repos" >/dev/null
+                echo "Gitea repo rill created"
+              fi
+
+              # Seed README + .gitignore + rill.yaml create-if-absent. The
+              # contents API creates the default branch on an empty repo.
+              # rill.yaml is CUSTOMER-OWNED (it is only a title +
+              # olap_connector — content, not infra);
+              # the remaining platform-managed files (duckdb.yaml, .env —
+              # ConfigMap overlay, statefulset.yaml) and Rill scratch are
+              # ignored so the rest of the repo is customer-authored.
+              # NB: not `path=` — that name is special in zsh (tied to
+              # PATH) and this snippet gets pasted into ops shells.
+              seed_file() {
+                fname=$1; b64=$2; msg=$3
+                if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/$fname?ref=main" >/dev/null; then
+                  echo "$fname already seeded"
+                else
+                  curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content\":\"$b64\",\"message\":\"$msg\",\"branch\":\"main\"}" \
+                    "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/$fname" >/dev/null
+                  echo "$fname seeded"
+                fi
+              }
+
+              GITIGNORE_B64=$(printf '%s\n' \
+                '/duckdb.yaml' '/.env' 'tmp/' '.rill*' \
+                '*.db' '*.db.*' '..*' | base64 -w0)
+              README_B64=$(base64 -w0 <<'EOF'
+              # Rill project
+
+              Your Rill dashboards and models live here, synced both ways
+              with the Rill instance on your box: edits in the Rill UI are
+              committed and pushed automatically; commits pushed here are
+              pulled onto the box and hot-reloaded.
+
+              This repo is a runnable Rill project: clone it, add a local
+              `duckdb.yaml` (public catalog endpoint) and `.env` (a
+              Console service-account credential), and `rill start` works
+              anywhere. Copy-paste templates for those two files are in
+              the FairTier BYO-Rill guide (`byo-rill.md` — ask via the
+              Console if you don't have it). On the box the two files are
+              platform-provisioned and gitignored, so they never conflict
+              with your local ones.
+              EOF
+              )
+              # Byte-identical to the ConfigMap overlay this file used to
+              # come from (copy-project cp): the live PVC copy must produce
+              # no diff the moment the file becomes tracked, or the sidecar
+              # autosave would commit a phantom change.
+              RILL_YAML_B64=$(base64 -w0 <<'EOF'
+              title: "Analytics — customer-{{ .Values.slug }}"
+              olap_connector: duckdb
+              EOF
+              )
+              seed_file ".gitignore" "$GITIGNORE_B64" "seed: .gitignore"
+              seed_file "README.md" "$README_B64" "seed: README"
+              seed_file "rill.yaml" "$RILL_YAML_B64" "seed: rill.yaml (customer-owned)"
+
+              # Live-repo converge: drop the '/rill.yaml' ignore line where
+              # an older seed wrote it (create-if-absent can't fix that) —
+              # the file must be tracked for a bare clone to be runnable.
+              # Surgical (only that line) so customer .gitignore edits stay.
+              gi=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/.gitignore?ref=main" || true)
+              if [ -n "$gi" ] && [ "$(echo "$gi" | jq -r '.encoding')" = "base64" ]; then
+                gi_sha=$(echo "$gi" | jq -r '.sha')
+                gi_cur=$(echo "$gi" | jq -r '.content' | base64 -d)
+                if printf '%s\n' "$gi_cur" | grep -qx '/rill.yaml'; then
+                  gi_new=$(printf '%s\n' "$gi_cur" | grep -vx '/rill.yaml' | base64 -w0)
+                  curl -sf -X PUT -u "$GITEA_USER:$GITEA_PASS" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content\":\"$gi_new\",\"sha\":\"$gi_sha\",\"message\":\"rill.yaml is customer-owned now - stop ignoring it\",\"branch\":\"main\"}" \
+                    "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/.gitignore" >/dev/null
+                  echo ".gitignore: /rill.yaml ignore dropped"
+                else
+                  echo ".gitignore already tracks rill.yaml"
+                fi
+              fi
+
+              # Live-repo converge: replace the OLD seeded README (it
+              # claimed a bare clone is not runnable). Only when the old
+              # marker text is intact — customer-authored READMEs are
+              # never touched.
+              rd=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/ARCHITECTURE.md?ref=main" || true)
+              if [ -n "$rd" ] && [ "$(echo "$rd" | jq -r '.encoding')" = "base64" ]; then
+                rd_cur=$(echo "$rd" | jq -r '.content' | base64 -d)
+                if echo "$rd_cur" | grep -q 'runnable Rill project on its own'; then
+                  rd_sha=$(echo "$rd" | jq -r '.sha')
+                  curl -sf -X PUT -u "$GITEA_USER:$GITEA_PASS" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content\":\"$README_B64\",\"sha\":\"$rd_sha\",\"message\":\"README: bare clones are runnable now (BYO-Rill)\",\"branch\":\"main\"}" \
+                    "$GITEA/api/v1/repos/$GITEA_USER/rill/contents/ARCHITECTURE.md" >/dev/null
+                  echo "README updated (BYO-Rill)"
+                fi
+              fi
+
+              if ! secret_absent rill-git; then
+                echo "rill-git already exists"
+              else
+                # A half-seeded run may have left a token we cannot read
+                # back — delete by name before minting a fresh one.
+                curl -sf -X DELETE -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens/rill-sidecar" || true
+                TOKEN=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"rill-sidecar","scopes":["write:repository"]}' \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens" | jq -r '.sha1')
+                if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                  echo "token creation failed" >&2
+                  exit 1
+                fi
+                kubectl create secret generic rill-git \
+                  --from-literal=username="$GITEA_USER" \
+                  --from-literal=token="$TOKEN"
+                echo "rill-git created"
+              fi
+
+              # --- 4. Platform editor token: mint -------------------------
+              # The box workspace-api's BOX_GIT_TOKEN: a scoped write token
+              # for the box-repo editor and the pipeline/transformation
+              # mirrors, all of which now run on the box. One token under the
+              # Gitea admin covers all admin repos (rill + transformations).
+              #
+              # It used to be deposited to central as well (the "credential
+              # inversion"), back when central converged these repos.
+              # Retired in split Phase 3E.
+              if ! secret_absent platform-git; then
+                echo "platform-git already exists"
+              else
+                curl -sf -X DELETE -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens/platform-editor" || true
+                PTOKEN=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"platform-editor","scopes":["write:repository"]}' \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens" | jq -r '.sha1')
+                if [ -z "$PTOKEN" ] || [ "$PTOKEN" = "null" ]; then
+                  echo "platform-editor token creation failed" >&2
+                  exit 1
+                fi
+                kubectl create secret generic platform-git \
+                  --from-literal=username="$GITEA_USER" \
+                  --from-literal=token="$PTOKEN"
+                echo "platform-git created"
+              fi
+
+              # --- 5. Snapshot-sidecar bearer: mint ----------------------
+              # Gates the published rill-snapshot endpoint
+              # (ingressroute-snapshot.yaml); the editor sidecar reads it as
+              # AUTH_TOKEN. Create-if-absent like rill-oidc.
+              if ! secret_absent rill-snapshot-auth; then
+                echo "rill-snapshot-auth already exists"
+              else
+                kubectl create secret generic rill-snapshot-auth \
+                  --from-literal=token="$(rand 48)"
+              fi
+
+              # Neither secret is deposited to central any more (split Phase
+              # 3E). Both are consumed on the box: platform-git is the box
+              # workspace-api's BOX_GIT_TOKEN, and rill-snapshot-auth is what
+              # the snapshot sidecar checks and the box's own workspace-api
+              # presents. Central deleted its copies along with the RPCs, and
+              # the box is the only place either was ever authoritative.
+          env:
+            - name: CUSTOMER_NAME
+              valueFrom:
+                configMapKeyRef:
+                  # Written by cloud-init (informational contract).
+                  name: fairtier-customer
+                  key: customerName
+          volumeMounts:
+            - name: casdoor-init
+              mountPath: /casdoor-init
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: casdoor-init
+          secret:
+            secretName: casdoor-init-data

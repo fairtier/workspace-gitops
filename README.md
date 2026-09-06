@@ -3,7 +3,7 @@
 The complete GitOps tree for a **FairTier workspace**: one machine, running
 single-node k3s with its own Argo CD, which syncs this repository.
 
-**Start here: [apps/box/README.md](./apps/box/README.md)** — the component
+**Start here: [ARCHITECTURE.md](./ARCHITECTURE.md)** — the component
 inventory, the bootstrap chain, day-2 behaviour, and how a deploy actually
 happens.
 
@@ -26,19 +26,27 @@ pointed inward, and the machine keeps running what it is pinned to. What is
 left is the same two fields any self-hoster uses.
 
 The full mechanism, both operators, and what to do with it:
-[apps/box/README.md § Fleet rollout](./apps/box/README.md#fleet-rollout).
+[ARCHITECTURE.md § Fleet rollout](./ARCHITECTURE.md#fleet-rollout).
 
 ## Layout
 
-Everything lives under `apps/box/`. The path is preserved rather than tidied
-away because it is referenced by every Argo CD Application in the tree,
-including the root one — a workspace's manifests say `path: apps/box/<chart>`,
-and renaming would be a change every running machine has to make at exactly the
-same moment.
+One directory per Argo CD `Application`:
+
+```
+root-app.yaml      the Application a machine is bootstrapped with; everything
+                   below is reached from it
+charts/root/       the app-of-apps — one template per component, and the
+                   self-managed copy of root-app.yaml
+charts/<name>/     one component: an upstream chart pinned with values, or a
+                   small chart of our own
+```
+
+A machine's manifests say `path: charts/<name>`, resolved at the commit that
+machine is pinned to. Nothing outside `charts/` is deployed.
 
 ## Conventions
 
-[apps/box/PUBLIC.md](./apps/box/PUBLIC.md) — what the comments in these charts
+[PUBLIC.md](./PUBLIC.md) — what the comments in these charts
 do and do not cite, and why no machine is named in them.
 
 ## Contributing

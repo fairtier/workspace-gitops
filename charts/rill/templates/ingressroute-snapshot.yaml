@@ -1,0 +1,46 @@
+# rill-snapshot.customer-<slug>.<baseDomain> — the editor's snapshot
+# sidecar, published so the central FairTier API can proxy the Console Save
+# button (SnapshotService.TriggerSnapshot) to the box. Bearer-gated at the
+# app layer (sidecar AUTH_TOKEN from Secret rill-snapshot-auth, minted by
+# the seed Job and deposited to central) — never exposed unauthenticated.
+# IngressRoute (not Ingress) for the same reason as DuckFlight: TLS
+# terminates at Traefik, the backend speaks plaintext HTTP/2 (h2c), which
+# plain Ingress cannot express. Covered by the wildcard *.customer-<slug>
+# DNS record — no Terraform DNS change needed.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: rill-snapshot
+  labels:
+    app: rill
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`rill-snapshot.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}`)
+      kind: Rule
+      services:
+        - name: rill-snapshot
+          port: 8484
+          scheme: h2c
+  tls:
+    secretName: rill-snapshot-tls
+---
+# IngressRoute has no ingress-shim, so the Certificate is explicit (same
+# pattern as charts/duckflight/ingress/templates/certificate.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rill-snapshot-tls
+  labels:
+    app: rill
+  annotations:
+    # cert-manager CRDs are installed in the same first sync of the box.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  secretName: rill-snapshot-tls
+  dnsNames:
+    - "rill-snapshot.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer

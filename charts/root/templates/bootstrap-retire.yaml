@@ -1,0 +1,43 @@
+# Retires cloud-init's k3s auto-deploy manifests once GitOps owns what they
+# delivered (charts/bootstrap-retire/) — the structural half of the
+# cloud-init drift fix, the other half being the ArgoCD HelmChartConfig.
+#
+# Wave 3, last: every guard the retire script checks is a resource an
+# earlier wave creates, so a first sync that reaches this app has already
+# had the chance to satisfy them. Prune is deliberately ON — deleting the
+# app removes the Job/CronJob but NOT the sentinels they wrote (they are
+# files on the host), so backing this app out does not resurrect the second
+# writer; that needs `rm` over SSH.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bootstrap-retire
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app.kubernetes.io/name: bootstrap-retire
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/bootstrap-retire
+    helm:
+      releaseName: bootstrap-retire
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

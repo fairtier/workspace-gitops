@@ -1,0 +1,4 @@
+# Injected by the app-of-apps (charts/root/templates/system-upgrade.yaml)
+# from the fleet-wide pin in charts/root/values.yaml. The placeholder is
+# never used on a box.
+k3sVersion: ""

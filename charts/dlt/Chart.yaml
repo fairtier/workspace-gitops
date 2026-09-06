@@ -1,0 +1,16 @@
+apiVersion: v2
+name: box-dlt
+description: >-
+  Per-box dlt-worker — the ingestion layer on the dedicated-VM substrate.
+  Polls the box's OWN workspace-api for Console-managed pipeline configs and
+  Run-now triggers, authenticating with the box-seeded dlt-worker Casdoor
+  client, and loads Iceberg tables through the on-box Lakekeeper into
+  the customer's R2 bucket (first consumer of the cloud-init-staged
+  fairtier-storage Secret). dlt's execution state (/dlt-state PVC) is synced
+  to the on-box Gitea repo by snapshot-sidecar in git mode — same pattern as
+  box-rill. Per-box state (OIDC client, git token) is GENERATED ON THE BOX by
+  the casdoor-seed/dlt-seed Jobs, so the app converges on already-provisioned
+  boxes too (day-2 rule in ARCHITECTURE.md).
+type: application
+version: 0.3.0
+appVersion: "0.9.0" # tracks values.yaml `image`

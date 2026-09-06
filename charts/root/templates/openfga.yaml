@@ -1,0 +1,35 @@
+# Per-box OpenFGA (image pin mirrors the central OpenFGA).
+# Cluster-internal only — no ingress.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: openfga
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app.kubernetes.io/name: openfga
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/openfga
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

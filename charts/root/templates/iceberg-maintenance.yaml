@@ -1,0 +1,62 @@
+# Per-box Iceberg compaction CronJob — the box half of table maintenance
+# (the Lakekeeper task-queue half is
+# enabled centrally by the platform worker). Wave 2 with the rest of the
+# data layer; ordering is soft anyway — the CronJob only needs Lakekeeper
+# and the dlt-oidc Secret at its nightly run time, not at sync time.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: iceberg-maintenance
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/name: iceberg-maintenance
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/iceberg-maintenance
+    helm:
+      releaseName: iceberg-maintenance
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+        {{- /* The orphan sweep DELETES customer data, so the chart default is
+             dry-run and arming is per box, through this box's own
+             orphanSweepMaxDeletes (values.yaml, set as a box-root helm
+             parameter). The proof that justifies arming is per warehouse — see
+             the runbook linked there. 0 -> absent parameters -> dry-run, which
+             is the behaviour a new box must have on its first night, and the
+             only behaviour reachable without a deliberate per-box edit.
+             One knob and not two: a cap without `delete` does nothing and
+             `delete` without a cap is unbounded, so neither half is separately
+             useful and joining them removes the half-armed state. */}}
+        {{- $maxDeletes := .Values.orphanSweepMaxDeletes | default 0 | int }}
+        {{- if gt $maxDeletes 0 }}
+        - name: orphanSweep.mode
+          value: "delete"
+        - name: orphanSweep.maxDeletes
+          value: "{{ $maxDeletes }}"
+        {{- end }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

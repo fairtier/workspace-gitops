@@ -1,0 +1,88 @@
+# Rill project files, copied onto the /project PVC by the copy-project
+# init container (Terraform-, er, git-managed config always wins).
+# Adapted from the hand-validated shared path with two box deltas:
+#   - vended R2 credentials instead of a static S3 secret: the box default
+#     is credential vending (same as charts/duckflight/values.yaml), so
+#     the ATTACH uses the default access-delegation mode and Lakekeeper
+#     vends temporary R2 credentials — no object-store keys on the box.
+#   - endpoint/warehouse/oauth2 URI are rendered here at template time;
+#     only the client pair goes through /project/.env.
+#
+# `{{ "{{ .env.X }}" }}` below is RILL's parser-side templating (resolved
+# against a project-root `.env` file the container's shell wrapper writes
+# at boot — see statefulset.yaml), Helm-escaped so it lands literally.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rill-project
+  labels:
+    app: rill
+data:
+  # rill.yaml is NOT here: it is customer-owned content, seeded once into
+  # the git repo by seed-job.yaml (byte-identical to what this ConfigMap
+  # historically rendered) and tracked from then on — that's what makes a
+  # bare clone runnable (BYO-Rill). duckdb.yaml stays platform-
+  # owned: it is where platform fixes land (attach idempotency,
+  # conn_init_sql, memory tuning), and ConfigMap ownership rolls a fix to
+  # every box in one GitOps commit.
+
+  # init_sql runs once at database initialization; conn_init_sql runs on
+  # EVERY new connection Rill pulls from its read/write pool. The secret
+  # and ATTACH live in conn_init_sql so every connection — including ones
+  # Rill opens on a fresh DuckDB handle — sees the catalog; both statements
+  # are idempotent no-ops when already applied. They must NOT be
+  # destructive: ATTACH/DETACH act on the instance-wide catalog list
+  # shared by all pooled connections (see the ATTACH comment below).
+  duckdb.yaml: |
+    type: connector
+    driver: duckdb
+    init_sql: |
+      INSTALL iceberg;
+      LOAD iceberg;
+      INSTALL httpfs;
+      LOAD httpfs;
+      -- Cap DuckDB's buffer manager below the container limit; DuckDB
+      -- otherwise sizes itself from host RAM and gets OOM-killed.
+      SET memory_limit = '{{ .Values.duckdb.memoryLimit }}';
+    conn_init_sql: |
+      -- Iceberg catalog auth via OAuth2 client_credentials. DuckDB-iceberg
+      -- fetches and refreshes tokens itself when this secret is referenced
+      -- from ATTACH. The client pair comes from the Secret named by
+      -- values.yaml icebergSecretsName: historically the box's DuckFlight
+      -- app, migrating to the dedicated `rill-iceberg` app whose principal
+      -- the platform worker grants writer (a box-local seed cannot grant
+      -- catalog access — the grant is always worker-side).
+      -- The token endpoint is the in-cluster Casdoor service: the public
+      -- auth.customer-* hostname hairpins pod -> own node public IP and
+      -- fails intermittently (always during boot ordering), which is what
+      -- "Could not get token from https://auth..." errors were. Tokens
+      -- are identical either way — Casdoor pins the `iss` claim to its
+      -- configured origin (app.conf), not the URL that served the request.
+      CREATE SECRET IF NOT EXISTS lk_auth (
+        TYPE iceberg,
+        CLIENT_ID '{{ "{{ .env.LAKEKEEPER_CLIENT_ID }}" }}',
+        CLIENT_SECRET '{{ "{{ .env.LAKEKEEPER_CLIENT_SECRET }}" }}',
+        OAUTH2_SERVER_URI 'http://casdoor:8000/api/login/oauth/access_token'
+      );
+
+      -- ATTACH/DETACH are INSTANCE-wide in DuckDB — one catalog list
+      -- shared by every pooled connection — not session-scoped. A
+      -- DETACH-then-ATTACH here (the previous shape) swapped `lk` out
+      -- from under concurrently running connections, tripping the
+      -- internal error "Database name lk was already used by a different
+      -- database for this meta transaction", which invalidates the whole
+      -- database until Rill reopens it. IF NOT EXISTS no-ops when `lk`
+      -- is registered and only attaches on a fresh instance — the same
+      -- pattern DuckFlight uses (internal/engine/engine.go).
+      -- No ACCESS_DELEGATION_MODE: the default (vended credentials) makes
+      -- Lakekeeper hand out temporary R2 credentials per request.
+      ATTACH IF NOT EXISTS '{{ .Values.warehouse }}' AS lk (
+        TYPE iceberg,
+        ENDPOINT 'http://lakekeeper:8181/catalog',
+        SECRET 'lk_auth'
+      );
+      -- Deliberately no `USE lk` — iceberg-attached catalogs carry no
+      -- default schema, so `USE lk` errors even though
+      -- `SELECT FROM lk.<ns>.<tbl>` works fine. Rill models must
+      -- fully-qualify table refs as `lk.<namespace>.<table>` (same
+      -- convention as DuckFlight).

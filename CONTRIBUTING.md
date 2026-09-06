@@ -16,7 +16,7 @@ prevent.
 we will apply it upstream and credit you. What we cannot do is merge it here.
 
 If you run a fork of this tree — which is a supported thing to do, see
-[apps/box/README.md](./apps/box/README.md) — you own your fork's merges, and
+[ARCHITECTURE.md](./ARCHITECTURE.md) — you own your fork's merges, and
 nothing about that requires our involvement.
 
 ## What a good issue looks like

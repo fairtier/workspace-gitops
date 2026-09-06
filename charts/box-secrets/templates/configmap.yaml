@@ -1,0 +1,149 @@
+# The sync script and its mapping, as an ORDINARY resource — not inline in the
+# hook Job. ArgoCD does not diff hook manifests, so a mapping embedded in the
+# Job would change in git and never trigger a sync; the box would keep running
+# yesterday's mapping until something else forced one. That is the
+# ensure-databases bug (reference_ensure_databases_hook_day2_gap), and adding a
+# secret is exactly the day-2 edit it broke.
+#
+# Both runners (the CronJob and the Sync hook) mount this, so there is one copy
+# of the logic.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: box-secrets-config
+  labels:
+    app: box-secrets
+  annotations:
+    # Wave -2 with the RBAC: the Sync hook that mounts this runs at -1, and
+    # waves order application, so a default-wave ConfigMap would not exist yet
+    # on a box's first sync — the hook pod would sit unschedulable waiting for
+    # a volume that arrives a wave too late.
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  mapping.json: |
+    {{ toJson (dict "secrets" .Values.secrets) }}
+
+  sync.sh: |
+    #!/bin/sh
+    # Fetch this box's centrally-minted secrets and reconcile them into
+    # Kubernetes Secrets. Idempotent; safe to run on a loop.
+    set -eu
+
+    CASDOOR="http://casdoor:8000"
+    CENTRAL="https://worker-api.{{ .Values.baseDomain }}"
+    OIDC_SECRET_NAME="{{ .Values.oidcSecret }}"
+
+    if ! kubectl get secret "$OIDC_SECRET_NAME" >/dev/null 2>&1; then
+      echo "WARNING: $OIDC_SECRET_NAME absent (casdoor-seed pending?) — nothing fetched; the next run retries"
+      exit 0
+    fi
+
+    OIDC_ID=$(kubectl get secret "$OIDC_SECRET_NAME" -o jsonpath='{.data.client-id}' | base64 -d)
+    OIDC_SECRET=$(kubectl get secret "$OIDC_SECRET_NAME" -o jsonpath='{.data.client-secret}' | base64 -d)
+
+    # In-cluster Casdoor, NOT the box's own public hostname. The token still
+    # carries the public issuer — Casdoor stamps `iss` from its configured
+    # origin, not from the request host — which is what central binds the
+    # tenant from. Going out through the public name means the box has to
+    # reach itself, and on at least one box that fails: the name has both an A
+    # and an AAAA, curl prefers the AAAA, and the pod network has no route to
+    # the box's own IPv6 (see charts/casdoor/templates/seed-job.yaml).
+    BEARER=$(curl -sf -X POST "$CASDOOR/api/login/oauth/access_token" \
+      -d "grant_type=client_credentials&client_id=$OIDC_ID&client_secret=$OIDC_SECRET" \
+      | jq -r '.access_token')
+    if [ -z "$BEARER" ] || [ "$BEARER" = "null" ]; then
+      echo "WARNING: could not mint a box token — nothing fetched; the next run retries"
+      exit 0
+    fi
+
+    # Empty `keys` means "everything central holds for this tenant": the box
+    # learns of a new secret by receiving it, so it must not have to be taught
+    # the key list first.
+    # `|| :` on both fetches: under set -e a refused connection would kill the
+    # whole script, and one endpoint being down must not stop delivery of the
+    # other's keys. A transport failure leaves the status empty → the != 200
+    # branch.
+    CENTRAL_HTTP=$(curl -s -o /tmp/central.json -w '%{http_code}' -X POST \
+      "$CENTRAL/boxcredential.v1.BoxCredentialService/FetchBoxSecrets" \
+      -H "Authorization: Bearer $BEARER" \
+      -H "Content-Type: application/json" \
+      -d '{}') || :
+    if [ "$CENTRAL_HTTP" != "200" ]; then
+      # 501 = that build predates the RPC. Whatever the failure, its keys are
+      # simply unavailable this run — the all-keys-or-SKIP rule below then
+      # leaves every Secret naming one of them untouched. A fetch that cannot
+      # answer is NOT an instruction to blank a Secret.
+      echo "WARNING: central FetchBoxSecrets returned $CENTRAL_HTTP — its keys unavailable this run"
+      printf '%s' '{"secrets":{}}' > /tmp/central.json
+    fi
+
+    # The box's own workspace-api mints secrets central cannot: a cut-over
+    # tenant's connections live in the box database, and the DuckFlight
+    # reconcile SQL is rendered from them (workspace-api 0.16.0, minter-only
+    # BoxCredentialService on the internal mux). Same bearer — the internal
+    # mux binds the tenant from the box Casdoor issuer exactly as central
+    # does. 404/older images just mean central-only, which is the pre-0.16.0
+    # behavior.
+    LOCAL_HTTP=$(curl -s -o /tmp/local.json -w '%{http_code}' -X POST \
+      "http://workspace-api:8081/boxcredential.v1.BoxCredentialService/FetchBoxSecrets" \
+      -H "Authorization: Bearer $BEARER" \
+      -H "Content-Type: application/json" \
+      -d '{}') || :
+    if [ "$LOCAL_HTTP" != "200" ]; then
+      echo "NOTE: local FetchBoxSecrets returned $LOCAL_HTTP — central keys only this run"
+      printf '%s' '{"secrets":{}}' > /tmp/local.json
+    fi
+
+    if [ "$CENTRAL_HTTP" != "200" ] && [ "$LOCAL_HTTP" != "200" ]; then
+      echo "WARNING: neither endpoint answered — existing Secrets left untouched; the next run retries"
+      exit 0
+    fi
+
+    # Merge, local winning on a shared key: for anything the box mints itself,
+    # its own database is the truth and a central value for the same key is a
+    # stale row from before the cut-over.
+    jq -s '{secrets: ((.[0].secrets // {}) + (.[1].secrets // {}))}' \
+      /tmp/central.json /tmp/local.json > /tmp/secrets.json
+
+    # jq -e: a mapping naming a key central does not hold yet leaves the whole
+    # Secret unwritten rather than writing it half-populated, because a
+    # consumer that mounts a Secret missing a field starts and then fails.
+    jq -r '.secrets[] | @base64' /config/mapping.json | while read -r row; do
+      decoded=$(echo "$row" | base64 -d)
+      name=$(echo "$decoded" | jq -r '.name')
+      # Target namespace, defaulting to ours. A Secret can only be mounted from
+      # the pod's own namespace, so a consumer that does not live here (Alloy is
+      # in `observability`) needs its copy written there. RBAC for each extra
+      # namespace is generated in rbac.yaml from this same list.
+      ns=$(echo "$decoded" | jq -r '.namespace // "{{ .Release.Namespace }}"')
+
+      # Values go to files, never to --from-literal: an argv carries them
+      # through /proc/<pid>/cmdline, which is readable by anything sharing the
+      # pod. Same reason the provisioner writes tfvars instead of passing
+      # -var. --from-file over the directory names each
+      # key after its filename, so the field names are the file names.
+      tmp=$(mktemp -d)
+      missing=""
+      for field in $(echo "$decoded" | jq -r '.data | keys[]'); do
+        central=$(echo "$decoded" | jq -r --arg f "$field" '.data[$f]')
+        # -j, not -r: -r appends a newline, and a token with a trailing \n
+        # fails authentication in a way that looks like a wrong token.
+        if ! jq -je --arg k "$central" '.secrets[$k]' /tmp/secrets.json > "$tmp/$field" 2>/dev/null; then
+          missing="$missing $central"
+        fi
+      done
+
+      if [ -n "$missing" ]; then
+        echo "SKIP $ns/$name: central holds no value yet for:$missing"
+        rm -rf "$tmp"
+        continue
+      fi
+
+      # Upsert, unlike the box's own deposit seeds which create-if-absent.
+      # Those guard a key whose only copy lives here; this one is a copy of a
+      # value central owns, so overwriting an existing Secret IS the rotation.
+      kubectl create secret generic "$name" -n "$ns" --from-file="$tmp" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      rm -rf "$tmp"
+      echo "OK $ns/$name"
+    done

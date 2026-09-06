@@ -1,0 +1,2 @@
+# Injected by the app-of-apps (see charts/root/templates/cert-manager.yaml).
+email: ""

@@ -1,3 +1,0 @@
-# Injected by the app-of-apps (apps/box/apps/templates/argocd.yaml) from the
-# fleet-wide pin in apps/box/apps/values.yaml; placeholder here.
-argocdChartVersion: ""

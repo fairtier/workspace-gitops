@@ -1,0 +1,80 @@
+# slug + baseDomain are injected by the app-of-apps
+# (charts/root/templates/box-secret-sync.yaml — that name is deliberate, see
+# the header comment there); placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+seedImage: alpine/k8s:1.33.13
+
+# How often to re-fetch. This is the reason the chart ships a CronJob and not
+# only a Sync hook: an ArgoCD hook runs when a sync runs, and a sync runs when
+# something in the manifests drifts. A secret rotated centrally changes nothing
+# on this box, so a hook-only design would deliver the new value whenever some
+# unrelated manifest happened to change — which is not a delivery guarantee.
+# The hook still exists (sync-job.yaml) so a fresh box does not wait for the
+# first tick.
+schedule: "*/15 * * * *"
+
+# The Casdoor client this box authenticates to central with. Reused from the
+# dlt-worker rather than minting a new application: the box's Casdoor is
+# wholly customer-controlled, so central binds the tenant from the ISSUER
+# host, never from the app name (BoxIssuerTrust in the workspace module) —
+# which app signs the token is not a security boundary, and adding one to
+# casdoor-seed's init data has its own hazards (see
+# reference_casdoor_init_data_semantics).
+oidcSecret: dlt-oidc
+
+# What to build out of the fetched keys.
+#
+# The value names the central key (what Terraform emitted into the box_secrets
+# output); the map key is the field inside the Kubernetes Secret. Adding a
+# secret is an entry here plus a line in the central box_secrets output — no
+# Go change, no migration, and nothing that has to reach cloud-init.
+#
+# `namespace` is optional and defaults to this release's. A Secret can only be
+# mounted from the consumer's OWN namespace, so anything consumed outside
+# fairtier-system has to name where it goes; rbac.yaml derives a Role per
+# namespace from this same list.
+#
+# A Secret is only written once EVERY key it lists is present centrally:
+# a half-populated Secret is worse than an absent one, because a consumer
+# mounting it starts and then fails on the missing field.
+secrets:
+  # Better Stack Telemetry — this box's own source. Minted per box centrally
+  # and consumed by Alloy, which runs in `observability`
+  # (charts/observability).
+  #
+  # The host is not a secret and travels this channel anyway: it is per-source,
+  # and the box's Helm values come from git, which cannot tell one box from
+  # another. Alloy reads both as files.
+  #
+  # Present here even though charts/observability ships with
+  # betterstack.enabled=false — the Secret has to exist BEFORE the flag is
+  # flipped, or Alloy loads a config pointing at a file that is not there. That
+  # ordering is the rollout: land the Secret, verify it, then flip the flag.
+  - name: betterstack-telemetry
+    namespace: observability
+    data:
+      token: betterstack_source_token
+      host: betterstack_ingesting_host
+
+  # Better Stack eBPF collector — this box's own collector object, minted in the
+  # same Terraform file as the source above but behind its OWN gate
+  # (betterstack_collector_enabled), because it authorises a privileged ~2 GiB
+  # DaemonSet rather than an exporter.
+  #
+  # Absent by default, and that is a working state rather than a broken one: a
+  # Secret is written only once EVERY key it lists is present centrally, so
+  # while the Terraform gate is off this Secret simply does not exist. The
+  # agent that would mount it is gated off too
+  # (`betterstackCollectorEnabled`, charts/root/values.yaml).
+  #
+  # The key name is COLLECTOR_SECRET, not `secret`: the chart consumes this
+  # Secret through envFrom, which maps keys to environment variable names
+  # verbatim. Renaming it produces a collector that starts and never
+  # authenticates.
+  - name: betterstack-collector
+    namespace: observability
+    data:
+      COLLECTOR_SECRET: betterstack_collector_secret
+

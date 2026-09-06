@@ -1,0 +1,42 @@
+# Per-box Casdoor OIDC provider (image pin mirrors the central Casdoor),
+# seeded via the cloud-init-written casdoor-init-data Secret.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: casdoor
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app.kubernetes.io/name: casdoor
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: charts/casdoor
+    helm:
+      releaseName: casdoor
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

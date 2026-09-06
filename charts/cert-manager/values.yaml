@@ -1,0 +1,35 @@
+# Helm values for the jetstack cert-manager chart on a dedicated-VM box.
+# Chart version is pinned in charts/root/values.yaml (v1.20.2, the same
+# pin the central cluster runs). Resource sizing copied from there too.
+#
+# Note: config.enableGatewayAPI is intentionally NOT set — the box uses
+# Traefik Ingress/IngressRoute, there are no Gateway API CRDs installed.
+
+crds:
+  enabled: true
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 25m
+    memory: 64Mi
+
+webhook:
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 15m
+      memory: 32Mi
+
+cainjector:
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 25m
+      memory: 64Mi

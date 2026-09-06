@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+  labels:
+    app: postgresql
+    tier: box
+spec:
+  serviceName: postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+      tier: box
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        tier: box
+    spec:
+      containers:
+        - name: postgresql
+          # Same image as the shared platform instances. No Bitnami.
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  # Written by cloud-init into fairtier-system.
+                  name: postgres-credentials
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgresql
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # 192Mi was below what this container actually holds: seven days of
+          # working set give avg 211Mi, p95 222Mi, max 235Mi, so Postgres spent
+          # the entire week above its own reservation. That is the eviction-
+          # candidate condition from ARCHITECTURE.md, on the process that
+          # backs Casdoor, OpenFGA, Lakekeeper, Gitea and the workspace — i.e.
+          # the one whose eviction takes the whole box with it. 240Mi covers the
+          # observed max; funded by trims elsewhere in the same commit.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 240Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+        # prometheus-community/postgres_exporter, scraped by the box Alloy and
+        # remote_written to central Prometheus (job "postgres", keep-list in
+        # charts/observability/config). Same sidecar shape as the shared
+        # cluster: it connects over
+        # localhost, so the superuser credential stays inside this pod — which
+        # already mounts it — instead of travelling to a second pod.
+        #
+        # Connects to the `postgres` database: pg_stat_database is
+        # cluster-wide, so casdoor/openfga/lakekeeper/gitea/workspace stats all
+        # arrive from this one connection, while the per-table collectors find
+        # nothing to enumerate. That is what keeps a box's metric volume flat
+        # as its databases grow.
+        #
+        # Public image on quay.io — boxes have no registry pull secret.
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          env:
+            # Split URI/USER/PASS rather than one DSN: no URL-escaping trap
+            # for the generated per-box password.
+            - name: DATA_SOURCE_URI
+              value: localhost:5432/postgres?sslmode=disable
+            - name: DATA_SOURCE_USER
+              value: postgres
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: postgres-password
+          ports:
+            - containerPort: 9187
+              name: metrics
+          # 7d working set: avg 13Mi, p95 16Mi, max 20Mi.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          # Liveness only, deliberately. A readiness probe here would gate the
+          # pod's endpoints on the exporter, so an exporter hiccup would take
+          # postgres out of the Service and the whole box down with it. `/` is
+          # the landing page and answers 200 even when the database is
+          # unreachable — that condition is `pg_up 0`, which is the
+          # BoxPostgresDown alert, not a restart.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9187
+            initialDelaySeconds: 10
+            periodSeconds: 30
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # No storageClassName: uses the k3s default (local-path) — the box's
+        # own disk. Off-box durability comes from pg_dump → R2 (Phase 5).
+        resources:
+          requests:
+            storage: 20Gi
