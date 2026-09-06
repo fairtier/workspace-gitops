@@ -1,0 +1,53 @@
+# The convergence half: ask on a schedule, so a channel moved centrally reaches
+# this box without anything changing in git. A Sync hook alone could not
+# promise that — a sync runs when the manifests drift, and a release moving is
+# precisely a change that leaves this box's manifests identical.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: box-release-sync
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # A box that was asleep or wedged should catch up on the next tick rather
+  # than have the run counted as missed forever.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: box-release
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: box-release
+          containers:
+            - name: sync
+              image: {{ .Values.image }}
+              command: ["/bin/sh", "/config/sync.sh"]
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+              resources:
+                # Burstable, and deliberately not BestEffort: on a small box
+                # the kernel kills BestEffort pods first, and this one runs on
+                # a schedule against a control plane that has already been
+                # taken down that way once.
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: config
+              configMap:
+                name: box-release-config
+                defaultMode: 0555

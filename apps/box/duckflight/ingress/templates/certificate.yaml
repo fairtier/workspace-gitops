@@ -1,0 +1,19 @@
+# Explicit Certificate — ingress-shim only watches Ingress resources, not
+# Traefik IngressRoutes, so the cert is requested here and referenced by
+# name from the IngressRoute's tls.secretName.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: duckflight-tls
+  labels:
+    app.kubernetes.io/name: duckflight
+  annotations:
+    # cert-manager CRDs are installed in the same first sync of the box.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  secretName: duckflight-tls
+  dnsNames:
+    - "duckflight.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer

@@ -1,0 +1,38 @@
+# api.customer-<slug>.<baseDomain> via the k3s built-in Traefik — the
+# hostname the Console's workspace transport will point at (Phase 3C).
+# cert-manager's ingress-shim creates the Certificate from the annotation.
+# Covered by the wildcard *.customer-<slug> DNS record, which is deliberately
+# grey-clouded — Cloudflare's Universal SSL does not cover this label depth —
+# so no Terraform DNS change is needed.
+#
+# Only the public mux is published. The internal :8081 (worker poll, run
+# reporting, source credentials) is Service-only by design.
+#
+# Connect over HTTP/1.1 is what the Console speaks, so a plain Ingress is
+# enough here; a native gRPC client would need the h2c IngressRoute shape
+# DuckFlight uses.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workspace-api
+  labels:
+    app: workspace-api
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "api.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: workspace-api-tls
+  rules:
+    - host: "api.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: workspace-api
+                port:
+                  number: 8080

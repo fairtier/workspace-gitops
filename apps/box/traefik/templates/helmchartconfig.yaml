@@ -1,0 +1,130 @@
+# HelmChartConfig, not HelmChart: k3s already owns the `traefik` HelmChart it
+# writes to /var/lib/rancher/k3s/server/manifests at first boot. A second
+# HelmChart of the same name would fight it; a HelmChartConfig is the
+# k3s-sanctioned way to MERGE values into a bundled release, and the
+# helm-controller re-runs the upgrade when this changes.
+#
+# Why it exists: the ingress had no resource requests, so every Traefik pod
+# was BestEffort — oom_score_adj=1000, the kernel's first pick under node-wide
+# pressure. A box whose ingress is the first thing killed loses every hostname
+# it serves (Console API, Casdoor, Rill, DuckFlight, Gitea) at exactly the
+# moment it is under load. Measured usage is ~32Mi/1m, so this costs almost
+# nothing in headroom and buys Burstable QoS.
+#
+# Requests only, deliberately — a memory limit on the ingress would convert
+# node pressure into a memcg kill of the one component that must survive it.
+#
+# The requests were never the big lever, though. Measured on a box
+# 2026-08-12, container by container, straight off /proc/<pid>/oom_score_adj:
+#
+#   svclb-traefik           BestEffort  system-node-critical      -997
+#   local-path-provisioner  BestEffort  system-node-critical      -997
+#   metrics-server          Burstable   system-node-critical      -997
+#   traefik                 Burstable   system-cluster-critical    988
+#   coredns                 Burstable   system-cluster-critical    982
+#
+# QoS is not what decides this. The kubelet short-circuits on priority
+# (`IsNodeCriticalPod` in GetContainerOOMScoreAdjust): a `system-node-critical`
+# pod is pinned to -997 whatever its QoS, and `system-cluster-critical` — which
+# k3s gives Traefik — buys scheduling preemption and nothing at all from the
+# OOM killer. So the requests above moved the ingress 1000 -> 988 out of a
+# ~2000-point range, while the lever that moves it to -997 was one value away.
+#
+# Hence priorityClassName. It also makes the datapath self-consistent: svclb
+# already runs node-critical and binds :80/:443 in front of this pod, so the
+# two halves of one ingress path no longer disagree by ~1985 points about how
+# survivable they are. Both live in kube-system, which is what the Priority
+# admission plugin requires — this is why the same fix cannot be applied to
+# ArgoCD, whose namespace is `argocd`; that one stays requests-only.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    # Rendered by the chart's _podtemplate.tpl (verified against the chart k3s
+    # ships, traefik-40.1.3+up40.1.0: top-level `priorityClassName` value).
+    # HelmChartConfig values merge over the HelmChart's, so this wins over the
+    # system-cluster-critical k3s sets.
+    priorityClassName: system-node-critical
+    # CPU, and the probes that arbitrate on it — the 2026-08-23 half of this
+    # file. The QoS/priority work above answered "who does the OOM killer eat";
+    # it says nothing about a box that never OOMs at all. On 2026-08-23 the
+    # daily demo pipeline run took a box to ~0.01% CPU idle on both cores and
+    # load1 29-33 with no OOM kill anywhere, Traefik's liveness /ping timed
+    # out, the kubelet killed it, and the restarted process died with
+    # `timed out waiting for controller caches to sync *v1.Node`. With no ready
+    # endpoint kube-proxy installs its no-endpoints REJECT for the
+    # LoadBalancer IP, so every hostname on the box answered *connection
+    # refused* rather than being slow — measured from outside as 3 refusals
+    # then 3x 200 in one 30-second probe, i.e. a flap.
+    # See the 2026-08-13 box-livelock incident and apps/box/README.md.
+    #
+    # 25m was copied from the memory-conscious sizing pass, where every request
+    # on this box is a claim on headroom it does not have. CPU is NOT that
+    # axis: declared CPU requests across apps/box total well under the ~1650m
+    # allocatable left by kube-reserved=cpu=250m + system-reserved=cpu=100m,
+    # and most of that total is one-shot Jobs that never coexist. So weight
+    # here is close to free, unlike every memory request in this tree. 200m
+    # puts the ingress above the dlt worker's 100m (apps/box/dlt/values.yaml)
+    # instead of at a quarter of it.
+    #
+    # Requests only, still — see the note above on why a memory limit on the
+    # ingress is wrong. The same reasoning applies to a CPU limit: throttling
+    # the ingress is converting node pressure into an outage of the one
+    # component that has to survive it.
+    resources:
+      requests:
+        cpu: 200m
+        memory: 48Mi
+    # Keys verified against traefik-40.1.3+up40.1.0, the chart k3s ships here:
+    # both probes are TOP-LEVEL values (not under `deployment`), hitting /ping.
+    #
+    # The chart defaults are `timeoutSeconds: 2` on both, with
+    # `failureThreshold: 1` on readiness and 3 on liveness. Readiness is the
+    # sharper of the two and the one that produces the refusal: ONE missed 2s
+    # ping and the endpoint is withdrawn. On a box under a runqueue of 30 that
+    # is a routine event, and its consequence is a hard REJECT rather than a
+    # slow response.
+    #
+    # This is the same treatment argocd got after the previous pressure
+    # incident (`livenessProbe.timeoutSeconds: 5` in
+    # apps/box/argocd/templates/helmchartconfig.yaml, with its own note that a
+    # 1s deadline on a deep health check is tight for any box). Traefik was
+    # left on chart defaults in that pass and is the component that then died
+    # of exactly the failure argocd had been patched for.
+    #
+    # Widened, not disabled: liveness still restarts a genuinely wedged
+    # process, now after 5 consecutive misses (~50s) rather than 3 (~30s).
+    # What this cannot fix is the kubelet's own scheduling delay in EXECUTING
+    # the probe — no pod-level setting reaches that.
+    readinessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 3
+    livenessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 5
+    # Redirect ALL plain-HTTP to HTTPS at the entrypoint, before routing.
+    # Found via the box Console: every Ingress here rides both of Traefik's
+    # entrypoints by default, so each hostname on the box (console, api,
+    # auth, git, rill, duckflight's gRPC aside) also answered on :80 — a
+    # session token sent to an http:// URL would have crossed the wire in
+    # clear. Entrypoint-level so no per-Ingress Middleware boilerplate and
+    # no app can forget it. ACME HTTP-01 keeps working: Let's Encrypt
+    # follows the 308 to https and does not validate the cert it finds
+    # there, so first issuance (default cert) and renewals both pass.
+    # Keys verified against the chart k3s actually ships (extracted from
+    # /var/lib/rancher/k3s/server/static/charts/traefik-40.1.3+up40.1.0.tgz
+    # on a box): the template wraps this in `with $config.http`, so
+    # `redirections` MUST sit under `http.` — one level up it is silently
+    # ignored, the upgrade succeeds, and nothing redirects. It emits
+    # --entryPoints.web.http.redirections.entryPoint.to=:443.
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true

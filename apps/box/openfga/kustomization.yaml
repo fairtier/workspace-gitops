@@ -1,0 +1,13 @@
+# Per-box OpenFGA — mirrors the central OpenFGA (image openfga/openfga
+# v1.17.1, migrate job + deployment + http/grpc services), sized down to a
+# single replica for a one-customer box. Cluster-internal only.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fairtier-system
+
+resources:
+  - migrate-job.yaml
+  - deployment.yaml
+  - service-http.yaml
+  - service-grpc.yaml

@@ -1,0 +1,90 @@
+# Wave -2 so both runners find their ServiceAccount: the Sync hook below runs
+# at -1, and waves order application, so default-wave RBAC would deadlock a
+# box's very first sync of this chart.
+#
+# The escalation here is real and worth stating plainly: this grants write
+# access to the Application that owns every other Application on the box. It is
+# narrowed as far as Kubernetes RBAC allows — one verb pair, one resource, one
+# NAME — and it is why this ships as its own chart rather than as an extra job
+# inside the credential sync. Two separate things a departing customer can stop
+# separately: deploys, and credential delivery.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: box-release
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-release
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  # Read the box's OIDC client to mint the token it asks with. Nothing else in
+  # this namespace, and no write of any kind.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.oidcSecret | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-release
+  namespace: {{ .Values.rootApp.namespace | quote }}
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  # get + patch on ONE Application by name. No create, no delete, no list —
+  # `list` is deliberately absent so this identity cannot even enumerate what
+  # else runs here, and the agent reads its target by name.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    resourceNames: [{{ .Values.rootApp.name | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-release
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-release
+subjects:
+  - kind: ServiceAccount
+    name: box-release
+    namespace: {{ .Release.Namespace | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-release
+  namespace: {{ .Values.rootApp.namespace | quote }}
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-release
+subjects:
+  - kind: ServiceAccount
+    name: box-release
+    # The ServiceAccount stays in this chart's namespace; only the grant travels.
+    namespace: {{ .Release.Namespace | quote }}

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: box-lakekeeper-ingress
+description: >-
+  Traefik Ingress + Let's Encrypt TLS for the on-box Lakekeeper
+  (lakekeeper.customer-<slug>.<baseDomain>). Replaces the shared path's
+  Gateway API HTTPRoute.
+type: application
+version: 0.1.0

@@ -1,0 +1,126 @@
+# DuckFlight chart values for a dedicated-VM box.
+#
+# Chart: OCI ghcr.io/fairtier/charts/duckflight, pinned in
+# apps/box/apps/values.yaml (0.0.5). Values shape mirrors the frozen
+# shared-cluster Application.
+# Hostname/slug-dependent values (tenant, iceberg.oauth2URI,
+# otel.serviceName) are injected as Application helm parameters.
+#
+# Secrets (fairtier-system):
+#   duckflight-auth-secrets:    auth-tokens, auth-users, basic-username,
+#                               basic-password (cloud-init — the token is
+#                               centrally known, shown in the Console)
+#   duckflight-iceberg-secrets: client-id, client-secret (Casdoor app for
+#                               DuckFlight — generated ON THE BOX by the
+#                               casdoor-seed Job)
+#
+# No s3 block: the box default is credential vending (R2) — Lakekeeper vends
+# temporary credentials via the Iceberg REST protocol.
+
+image:
+  repository: ghcr.io/fairtier/duckflight
+  # 0.1.0 identifies a Flight session by an HMAC-signed cookie instead of the
+  # peer address (two clients behind one NAT no longer share a session), closes
+  # the crash/session-leak/fail-open findings of its security review, and adds
+  # OTel traces + metrics (inert — see otel below). AUTH_JWT_SECRET now also
+  # keys the cookie HMAC; the box sets no `jwt-secret` on
+  # duckflight-auth-secrets, so it is auto-generated per pod, which is fine at
+  # the single replica hpa below pins.
+  #
+  # Chart 0.0.5 (apps/box/apps/values.yaml) is that restricted-PSA work,
+  # finally published: tag `helm/v0.0.5` on the duckflight repo, whose CI
+  # rewrites Chart.yaml `version`/`appVersion` from the tag name — so the
+  # in-repo Chart.yaml saying 0.1.0 is not what shipped, 0.0.5 is. It adds
+  # `automountServiceAccountToken: false` plus pod/container securityContexts
+  # (runAsNonRoot, uid/gid 1000, drop ALL, seccomp RuntimeDefault) as chart
+  # DEFAULTS — no values needed here. uid 1000 is the `duckflight` user the
+  # image's `useradd` creates; the process writes nothing to disk either way.
+  # appVersion tracks the tag, not the image: the tag below is what runs.
+  #
+  # No longer mirrors the shared-path pin (still 0.0.14): that is the
+  # ❄️ frozen shared substrate.
+  #
+  # 0.2.0 is the query-time-federation door: reconcile-SQL watcher, curated-extension initContainer support, client
+  # INSTALL/LOAD rejection, temp_directory spill. Needs chart 0.0.6
+  # (apps/box/apps/values.yaml).
+  #
+  # 0.2.1 moves the embedded engine from DuckDB 1.5.0 to 1.5.5 (duckdb-go
+  # v2.10505.0) on a Go 1.27 rebuild. Nothing of ours changed, but the engine
+  # did — which is why extensions.image below moves in the same commit.
+  tag: "0.2.1"
+
+# No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
+# into the server image itself, and since chart 0.0.7 an unset extensions.image
+# means "run straight off the baked set" — no initContainer, no emptyDir.
+# The extras door stays: setting extensions.image overlays an extras-only
+# image (github.com/fairtier/duckdb-extensions, dormant) as a union with the
+# baked set. gsheets left with query-time federation (retired 2026-08-27);
+# pipeline extensions live in the dlt-worker image, not here.
+
+# Client-issued INSTALL/LOAD are refused; the engine loads only what the
+# extensions image bakes. (The reconcileSql mount — federation's LOAD +
+# CREATE SECRET channel — was retired with it.)
+rejectClientExtensions: true
+
+# Spill directory so a join larger than memoryLimit degrades to disk
+# instead of erroring. sizeLimit is an emptyDir cap (node disk, evicts
+# the pod at the cap — bounded blast radius on the shared box disk).
+tempDir:
+  path: /tmp/duckdb
+  sizeLimit: 2Gi
+
+auth:
+  existingSecret: duckflight-auth-secrets
+
+iceberg:
+  # In-namespace Lakekeeper service, same endpoint as the shared path.
+  endpoint: http://lakekeeper:8181/catalog
+  warehouse: default
+  existingSecret: duckflight-iceberg-secrets
+  # In-namespace Casdoor token endpoint. The public auth.customer-*
+  # hostname hairpins pod -> own node public IP and fails intermittently;
+  # tokens are identical either way (Casdoor pins `iss` to its configured
+  # origin, not the request URL).
+  oauth2URI: http://casdoor:8000/api/login/oauth/access_token
+
+resources:
+  # DuckDB engine settings — memoryLimit ~65% of the container limit,
+  # matching the shared path's derivation (1536Mi * 0.65 = 998MiB).
+  memoryLimit: 998MiB
+  maxThreads: 2
+  queryTimeout: 60s
+  poolSize: 4
+
+  # Request tracks measured usage; the 1536Mi limit is untouched because that
+  # is what memoryLimit above is derived from and what a real query is allowed
+  # to consume. Reserving 512Mi around the clock for a mostly-idle query engine
+  # was the single largest standing claim on a 3.7Gi box.
+  #
+  # 128Mi came from "~127Mi / 5m measured" — a single `kubectl top` sample, and
+  # it was wrong. Seven days of `container_memory_working_set_bytes` say
+  # avg 42Mi, p95 80Mi, **max 80Mi**: the reservation was 60% above the highest
+  # value the container reached all week. 96Mi covers that max with margin.
+  # Net-neutral sizing rule: apps/box/argocd/templates/helmchartconfig.yaml.
+  requests:
+    cpu: 25m
+    memory: 96Mi
+  limits:
+    cpu: 1000m
+    memory: 1536Mi
+
+hpa:
+  minReplicas: 1
+  maxReplicas: 1
+  targetCPUUtilization: 70
+
+gateway:
+  enabled: false # gRPC exposure via Traefik IngressRoute (ingress/ chart)
+
+# OpenTelemetry — points at the Phase-5 Alloy endpoint. The SDK exports every
+# signal it has to this one endpoint, so Alloy accepts traces, logs AND metrics
+# and drops them all on the box (apps/box/observability/config); a signal Alloy
+# does not accept comes back `Unimplemented` and the SDK logs that failure to
+# stdout on every batch. serviceName injected as a helm parameter.
+otel:
+  endpoint: alloy.observability.svc.cluster.local:4317
+  insecure: true

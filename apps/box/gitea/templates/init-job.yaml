@@ -1,0 +1,136 @@
+# One-shot seeding — local admin + Casdoor OIDC auth source. Runs as an
+# ArgoCD Sync hook (openfga migrate-job pattern) so the immutable Job is
+# recreated on every sync; every step below is idempotent. The gitea CLI
+# talks to the database directly (no running server needed), so the pod
+# only carries throwaway emptyDirs for config/work dirs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-init
+  labels:
+    app: gitea-init
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: gitea-init
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.initImage }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h postgresql.fairtier-system.svc.cluster.local -U postgres; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: init
+          image: {{ .Values.image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              # Materialize /etc/gitea/app.ini from the GITEA__* env. The
+              # image's GITEA_APP_INI/GITEA_WORK_DIR env survive the
+              # entrypoint override, and the gitea binary honors them — but
+              # environment-to-ini (1.26) requires the target as an explicit
+              # flag (verified against the pinned image; omitting it fails
+              # with "flag is required but not set: --config").
+              environment-to-ini --config "$GITEA_APP_INI"
+
+              # Schema migrations — idempotent; makes the job independent of
+              # server startup order.
+              gitea migrate
+
+              if gitea admin user list --admin | grep -qw "$GITEA_ADMIN_USERNAME"; then
+                echo "admin user $GITEA_ADMIN_USERNAME already exists"
+              else
+                gitea admin user create --admin \
+                  --username "$GITEA_ADMIN_USERNAME" \
+                  --password "$GITEA_ADMIN_PASSWORD" \
+                  --email "$GITEA_ADMIN_USERNAME@customer-{{ .Values.slug }}.{{ .Values.baseDomain }}" \
+                  --must-change-password=false
+              fi
+
+              if gitea admin auth list | grep -qw casdoor; then
+                echo "casdoor auth source already exists"
+              else
+                # Auth-source creation fetches the discovery document, so
+                # wait for on-box Casdoor (wave 1) to answer first; the
+                # Job's backoff covers the remainder of a slow first boot.
+                DISCOVERY="https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/.well-known/openid-configuration"
+                i=0
+                until wget -q --spider "$DISCOVERY" || [ "$i" -ge 30 ]; do
+                  echo "Waiting for Casdoor OIDC discovery..."
+                  i=$((i + 1))
+                  sleep 5
+                done
+                gitea admin auth add-oauth \
+                  --name casdoor \
+                  --provider openidConnect \
+                  --key "$GITEA_OIDC_CLIENT_ID" \
+                  --secret "$GITEA_OIDC_CLIENT_SECRET" \
+                  --auto-discover-url "$DISCOVERY" \
+                  --scopes openid \
+                  --scopes profile \
+                  --scopes email
+              fi
+          env:
+            {{- include "gitea.env" . | nindent 12 }}
+            - name: GITEA_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  # Generated on-box by the seed Job (seed-job.yaml);
+                  # "admin" itself is reserved by Gitea.
+                  name: gitea-secrets
+                  key: admin-username
+            - name: GITEA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gitea-secrets
+                  key: admin-password
+            - name: GITEA_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  # The `gitea` Casdoor application created by the seed Job
+                  # (seed-job.yaml).
+                  name: gitea-secrets
+                  key: oidc-client-id
+            - name: GITEA_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gitea-secrets
+                  key: oidc-client-secret
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gitea
+            - name: work
+              mountPath: /var/lib/gitea
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: config
+          emptyDir: {}
+        - name: work
+          emptyDir: {}

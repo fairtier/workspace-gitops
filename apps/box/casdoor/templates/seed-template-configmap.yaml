@@ -1,0 +1,97 @@
+# The init_data.json SKELETON the casdoor-seed Job fills in on the box.
+# Everything secret is a %PLACEHOLDER% substituted at runtime from on-box
+# Secrets — no secret material in git, none baked into cloud-init.
+#
+# Shape notes (mirrors the frozen shared-cluster path):
+#   - the JWT signing cert entry carries NO certificate/privateKey: Casdoor
+#     generates the RSA keypair itself on first init (object/cert.go
+#     populateContent) and keeps it in its database — the key never exists
+#     in Terraform state or in git.
+#   - app names are BASE names (no "-<slug>" suffix) — see the Lakekeeper
+#     principal contract comment in values.yaml.
+#   - `initDataNewOnly = true` (configmap.yaml app.conf) makes Casdoor apply
+#     this create-if-absent on every startup: existing objects (including
+#     the already-generated cert on older boxes) are never touched.
+{{- $domain := printf "customer-%s.%s" .Values.slug .Values.baseDomain }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: casdoor-seed-template
+  labels:
+    app: casdoor-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  init_data.json.tpl: |
+    {
+      "organizations": [
+        {
+          "owner": "admin",
+          "name": {{ .Values.slug | quote }},
+          "displayName": "%CUSTOMER_NAME%",
+          "websiteUrl": "https://{{ $domain }}",
+          "favicon": "https://fairtier.com/favicon.ico",
+          "defaultAvatar": "https://cdn.casbin.org/img/casbin.svg",
+          "passwordType": "argon2id",
+          "passwordOptions": ["AtLeast8"],
+          "countryCodes": ["US", "CZ", "DE"],
+          "balanceCurrency": "USD",
+          "languages": ["en"],
+          "initScore": 2000,
+          "enableSoftDeletion": false,
+          "isProfilePublic": false
+        }
+      ],
+      "certs": [
+        {
+          "owner": "admin",
+          "name": "cert-{{ .Values.slug }}",
+          "displayName": "JWT signing cert - %CUSTOMER_NAME%",
+          "scope": "JWT",
+          "type": "x509",
+          "cryptoAlgorithm": "RS256",
+          "bitSize": 4096,
+          "expireInYears": 20
+        }
+      ],
+      "applications": [
+        {{- range $i, $app := .Values.initDataApplications }}
+        {{- if $i }},{{ end }}
+        {
+          "owner": "admin",
+          "name": {{ $app.name | quote }},
+          "displayName": "{{ $app.displayName }} - %CUSTOMER_NAME%",
+          "description": "{{ $app.description }} for %CUSTOMER_NAME%",
+          "organization": {{ $.Values.slug | quote }},
+          "cert": "cert-{{ $.Values.slug }}",
+          "clientId": "%CLIENT_ID_{{ $app.name }}%",
+          "clientSecret": "%CLIENT_SECRET_{{ $app.name }}%",
+          "enablePassword": {{ $app.enablePassword }},
+          "enableSignUp": false,
+          "grantTypes": {{ toJson $app.grantTypes }},
+          "redirectUris": ["https://{{ $app.host }}.{{ $domain }}{{ $app.callbackPath }}"],
+          "tokenFormat": "JWT",
+          "expireInHours": 168,
+          "refreshExpireInHours": 336
+        }
+        {{- end }}
+      ],
+      "users": [
+        {
+          "owner": {{ .Values.slug | quote }},
+          "name": "admin",
+          "displayName": "Admin",
+          "email": "admin@{{ $domain }}",
+          "emailVerified": true,
+          "password": "%ADMIN_PASSWORD%",
+          "type": "normal-user",
+          "isAdmin": true,
+          "signupApplication": "web"
+        }
+      ]
+    }
+  # name / credentialsSecret / generated — the seed Job's work list.
+  apps.tsv: |
+    {{- range .Values.initDataApplications }}
+    {{ .name }} {{ .credentialsSecret }} {{ .generated }}
+    {{- end }}

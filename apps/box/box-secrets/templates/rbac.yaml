@@ -1,0 +1,101 @@
+{{- $rel := .Release.Namespace -}}
+{{- /*
+  Group the managed Secrets by target namespace. A mapping entry without an
+  explicit `namespace` lands in this release's namespace; the Better Stack one
+  does not, because Alloy runs in `observability` and a pod cannot mount a
+  Secret from another namespace.
+*/ -}}
+{{- $byNs := dict $rel (list) -}}
+{{- range .Values.secrets }}
+  {{- $ns := default $rel .namespace -}}
+  {{- $_ := set $byNs $ns (append (index $byNs $ns | default (list)) .name) -}}
+{{- end }}
+# RBAC for both runners. Wave -2 so it exists before the wave -1 Sync hook
+# pod starts — a later wave would deadlock the very first sync on a missing
+# ServiceAccount (same reason as apps/box/dlt/templates/seed-rbac.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: box-secrets
+  labels:
+    app: box-secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+{{- range $ns, $names := $byNs }}
+{{- if ne $ns $rel }}
+---
+# The target namespace has to exist before a Role can be created in it, and this
+# chart syncs before the app that owns the namespace. Creating it here is
+# idempotent — ArgoCD's CreateNamespace on that app is a no-op against an
+# existing one.
+#
+# Prune=false is not optional: without it, deleting or pruning box-secrets would
+# take the namespace and EVERYTHING IN IT, which for `observability` is the
+# box's entire telemetry stack. A credential-sync chart must never be able to
+# delete a namespace it merely writes one Secret into.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+    argocd.argoproj.io/sync-options: Prune=false
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-secrets
+  namespace: {{ $ns | quote }}
+  labels:
+    app: box-secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  {{- if eq $ns $rel }}
+  # Read the box's OIDC client to mint the token it authenticates to central
+  # with. Only in this chart's own namespace — the token is not needed anywhere
+  # a managed Secret happens to land.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $.Values.oidcSecret | quote }}]
+    verbs: ["get"]
+  {{- end }}
+  {{- if $names }}
+  # Write only the Secrets this chart is configured to manage here. `create`
+  # cannot be name-scoped (a Kubernetes RBAC limitation — the name does not
+  # exist yet at admission), but get/patch/update are, so a compromised sync pod
+  # cannot read or rewrite postgres-credentials, alloy-ingest-auth, or the box's
+  # own age key. A namespace with nothing mapped into it gets no create either.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      {{- range $names }}
+      - {{ . | quote }}
+      {{- end }}
+    # get as well as write: `kubectl apply` reads the live object to diff.
+    verbs: ["get", "patch", "update"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-secrets
+  namespace: {{ $ns | quote }}
+  labels:
+    app: box-secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-secrets
+subjects:
+  - kind: ServiceAccount
+    name: box-secrets
+    # The ServiceAccount stays in this chart's namespace; only the grant travels.
+    namespace: {{ $rel | quote }}
+{{- end }}

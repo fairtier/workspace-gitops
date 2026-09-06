@@ -1,0 +1,51 @@
+{{- if .Values.workspaceApiEnabled }}
+# The workspace plane running ON the box (control-plane/workspace-plane
+# split, Phase 3B). Wave 3:
+# needs postgres (0), casdoor (1) and the credentials minted by the rill
+# and dlt seed Jobs (2) — platform-git, rill-snapshot-auth, dlt-age.
+#
+# Ships SHADOW: it reconciles the box repos into the box database, but no
+# client is pointed at it (the Console still calls central, the dlt-worker
+# still polls central). Cutover is Phase 3C/3D — and note that leaving
+# central's mirrors and this one both live for the same customer is only
+# safe while nothing SAVES through the box: two converge paths over one
+# repo from two databases would delete each other's files.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: workspace-api
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app.kubernetes.io/name: workspace-api
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/workspace-api
+    helm:
+      releaseName: workspace-api
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+{{- end }}

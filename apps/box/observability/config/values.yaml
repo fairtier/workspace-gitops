@@ -1,0 +1,23 @@
+# slug + baseDomain + stackNamespace are injected by the app-of-apps
+# (apps/box/apps/templates/observability.yaml).
+slug: ""
+baseDomain: "fairtier.com"
+# Namespace holding the FairTier stack, scoping the postgres_exporter scrape.
+# Mirrors the same key in apps/box/apps/values.yaml.
+stackNamespace: "fairtier-system"
+
+betterstack:
+  # Export logs, metrics and traces to this box's own Better Stack source, in
+  # ADDITION to the central push (which is never removed by this flag): the
+  # direct export is an evaluation, and nothing central is being retired.
+  #
+  # The ordering mattered: turning this on makes Alloy's config read
+  # /etc/betterstack/{token,host}, which only exist once box-secrets has written
+  # Secret `betterstack-telemetry` into `observability`. That Secret ships
+  # unconditionally (apps/box/box-secrets/values.yaml), so the sequence was land
+  # it first, confirm on the canary, then flip — which is what happened on
+  # 2026-08-15: the canary box received the Secret through the day-2 channel (host
+  # s2682195…, matching the source Terraform had just minted) with no
+  # reprovision, no cloud-init edit and no SSH. Keep that order for any box that
+  # is behind: a flip ahead of the Secret leaves Alloy reading two absent files.
+  enabled: true

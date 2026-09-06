@@ -1,0 +1,52 @@
+# The convergence half: re-fetch on a schedule so a secret rotated centrally
+# lands without anything changing in git. The Sync hook alone cannot promise
+# that — see the schedule comment in values.yaml.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: box-secrets-sync
+  labels:
+    app: box-secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # A box that was asleep or wedged should still catch up on the next tick
+  # rather than have the run counted as missed forever.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: box-secrets
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: box-secrets
+          containers:
+            - name: sync
+              image: {{ .Values.seedImage }}
+              command: ["/bin/sh", "/config/sync.sh"]
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+              resources:
+                # Burstable, and deliberately not BestEffort: on a 3.7 GB box
+                # the kernel kills BestEffort pods first, and this one runs
+                # every 15 minutes against a control plane that has already
+                # been taken down that way once.
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: config
+              configMap:
+                name: box-secrets-config
+                defaultMode: 0555

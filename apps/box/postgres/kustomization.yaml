@@ -1,0 +1,12 @@
+# On-box PostgreSQL — house style from the central platform Postgres
+# (plain postgres:17-alpine StatefulSet; NO Bitnami — repo rule).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fairtier-system
+
+resources:
+  - databases-configmap.yaml
+  - ensure-databases-job.yaml
+  - statefulset.yaml
+  - service.yaml

@@ -1,0 +1,41 @@
+# Gitea logout fix.
+#
+# Gitea's "Sign Out" (OIDC source, registered by the gitea-init Job with
+# --auto-discover-url) clears its own session, then redirects the browser to
+# Casdoor's discovered end_session_endpoint —
+#   /api/logout?client_id=<gitea>&post_logout_redirect_uri=https://git.…/
+# — but WITHOUT an `id_token_hint`. Casdoor (3.95.0) hard-requires that
+# parameter whenever a post_logout_redirect_uri is present and otherwise
+# returns {"status":"error","msg":"Missing parameter: id_token_hint"}. Neither
+# side exposes a config toggle: Gitea's `admin auth add-oauth` has no logout
+# flag and derives the endpoint from runtime discovery; Casdoor's requirement
+# is hardcoded.
+#
+# So intercept that specific request at the ingress: a 302 straight back to
+# Gitea's home. By the time the browser reaches Casdoor's /api/logout, Gitea
+# has ALREADY cleared its local session, so the user IS logged out of Gitea —
+# this only replaces the dead-end error page with a clean bounce-back. The
+# match is scoped by the post_logout_redirect_uri host (this box's git.
+# subdomain), so only Gitea-destined logouts are caught; the Rill/dashboards
+# oauth2-proxies don't use Casdoor's end_session endpoint at all.
+#
+# Tradeoff (documented): the request never reaches Casdoor, so the Casdoor SSO
+# cookie is NOT cleared — a subsequent "Sign in with casdoor" re-logs in
+# seamlessly. That is ordinary per-app logout vs. single-logout; a true SSO
+# logout needs the id_token_hint Gitea doesn't send. Acceptable for the MVP.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: casdoor-gitea-logout-fix
+  labels:
+    app: casdoor
+spec:
+  redirectRegex:
+    # Matches Casdoor's end_session with a post_logout_redirect_uri pointing at
+    # THIS box's Gitea (the host is literal even in the %-encoded uri, since
+    # only `://` and `/` get encoded). RE2 — no lookahead, so we can't exclude
+    # a well-formed id_token_hint logout, but Gitea is the only client that
+    # hits this endpoint.
+    regex: "^https?://[^/]+/api/logout\\?.*post_logout_redirect_uri=[^&]*git\\.customer-{{ .Values.slug }}\\.{{ .Values.baseDomain }}.*$"
+    replacement: "https://git.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/"
+    permanent: false

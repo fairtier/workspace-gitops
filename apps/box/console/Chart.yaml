@@ -1,0 +1,12 @@
+apiVersion: v2
+name: box-console
+description: >-
+  The workspace Console, running ON the box — the browser UI over
+  workspace-api, split out of the hosted Console as its own public app
+  (github.com/fairtier/console). One plane, one session: it authenticates against the box's own Casdoor (application
+  `console`, minted by the workspace-api seed Job) and talks to exactly one
+  API, this box's workspace-api. The image ships neutral; everything
+  per-box arrives at runtime via /config.json from FT_* env.
+type: application
+version: 0.1.0
+appVersion: "0.11.1" # tracks values.yaml `image`

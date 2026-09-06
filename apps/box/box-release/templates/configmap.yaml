@@ -1,0 +1,115 @@
+# The script as an ORDINARY resource, not inline in the hook Job: ArgoCD does
+# not diff hook manifests, so logic embedded in the Job would change in git and
+# never trigger a sync — the box would keep running yesterday's script until
+# something else forced one. Both runners mount this, so there is one copy.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: box-release-config
+  labels:
+    app: box-release
+  annotations:
+    # Wave -2 with the RBAC: the Sync hook that mounts this runs at -1, and a
+    # default-wave ConfigMap would arrive a wave too late on a first sync.
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  sync.sh: |
+    #!/bin/sh
+    # Ask the control plane which commit this box should run, and move the root
+    # Application if the answer differs. Idempotent; safe on a loop.
+    #
+    # Every failure path here ends in "keep the current pin". That is the whole
+    # safety property: an unreachable or confused control plane leaves a box
+    # running exactly what it was running, which is the opposite of a box that
+    # followed a branch — there, the artifact going missing stopped the box
+    # silently.
+    set -eu
+
+    CASDOOR="http://casdoor:8000"
+    CENTRAL="https://worker-api.{{ .Values.baseDomain }}"
+    OIDC_SECRET_NAME="{{ .Values.oidcSecret }}"
+    APP="{{ .Values.rootApp.name }}"
+    APP_NS="{{ .Values.rootApp.namespace }}"
+
+    if ! kubectl get secret "$OIDC_SECRET_NAME" >/dev/null 2>&1; then
+      echo "WARNING: $OIDC_SECRET_NAME absent (identity seed pending?) — pin unchanged; the next run retries"
+      exit 0
+    fi
+
+    OIDC_ID=$(kubectl get secret "$OIDC_SECRET_NAME" -o jsonpath='{.data.client-id}' | base64 -d)
+    OIDC_SECRET=$(kubectl get secret "$OIDC_SECRET_NAME" -o jsonpath='{.data.client-secret}' | base64 -d)
+
+    # In-cluster Casdoor, not this box's public hostname. The token still
+    # carries the public issuer (Casdoor stamps `iss` from its configured
+    # origin, not from the request host), which is what the control plane binds
+    # the tenant from. Going out through the public name means the box has to
+    # reach itself, and on at least one box that fails: the name has both an A
+    # and an AAAA, curl prefers the AAAA, and the pod network has no route to
+    # the box's own IPv6.
+    BEARER=$(curl -sf -X POST "$CASDOOR/api/login/oauth/access_token" \
+      -d "grant_type=client_credentials&client_id=$OIDC_ID&client_secret=$OIDC_SECRET" \
+      | jq -r '.access_token')
+    if [ -z "$BEARER" ] || [ "$BEARER" = "null" ]; then
+      echo "WARNING: could not mint a box token — pin unchanged; the next run retries"
+      exit 0
+    fi
+
+    # `|| :` because under set -e a refused connection would kill the script
+    # before the status could be read, and an unreachable control plane is a
+    # normal condition here, not an error.
+    HTTP=$(curl -s -o /tmp/release.json -w '%{http_code}' -X POST \
+      "$CENTRAL/release.v1.ReleaseService/GetBoxRevision" \
+      -H "Authorization: Bearer $BEARER" \
+      -H "Content-Type: application/json" \
+      -d '{}') || :
+    if [ "$HTTP" != "200" ]; then
+      # 404 = nothing published for this box yet; 501 = a control plane that
+      # predates the RPC; anything else = unavailable. All the same answer.
+      echo "NOTE: GetBoxRevision returned $HTTP — pin unchanged"
+      exit 0
+    fi
+
+    REVISION=$(jq -r '.revision // ""' /tmp/release.json)
+    CHANNEL=$(jq -r '.channel // ""' /tmp/release.json)
+
+    # The shape check is a security control, not a typo guard. A branch or tag
+    # name accepted here would restore exactly the property pinning exists to
+    # remove — a ref someone else can move out from under this box — so a
+    # non-commit answer is REFUSED rather than applied, whoever sent it.
+    if ! printf '%s' "$REVISION" | grep -Eq '^[0-9a-f]{40}$'; then
+      echo "REFUSING: $(printf '%s' "$REVISION" | head -c 64) is not a commit SHA; pin unchanged"
+      exit 1
+    fi
+
+    CURRENT=$(kubectl -n "$APP_NS" get application "$APP" -o jsonpath='{.spec.source.targetRevision}')
+    if [ "$CURRENT" = "$REVISION" ]; then
+      echo "OK $APP already at $(printf '%.12s' "$REVISION") (channel ${CHANNEL:-unknown})"
+      exit 0
+    fi
+
+    # Both halves move together or neither does. The root app is SELF-MANAGED —
+    # it renders its own definition from its own helm parameters — so patching
+    # spec.source.targetRevision alone lets the next render write the old value
+    # back. Changing both makes the new value a fixed point that reproduces
+    # itself, which is also why the change survives a k3s restart.
+    #
+    # A JSON patch, and the index is looked up rather than assumed: a merge
+    # patch on `parameters` would replace the whole LIST, dropping slug,
+    # baseDomain, acmeEmail and the per-box arming values with it. JSON patch
+    # ops are applied atomically, so a wrong index fails the patch instead of
+    # half-moving the box.
+    IDX=$(kubectl -n "$APP_NS" get application "$APP" -o json \
+      | jq '.spec.source.helm.parameters | map(.name == "targetRevision") | index(true)')
+    if [ "$IDX" = "null" ] || [ -z "$IDX" ]; then
+      echo "REFUSING: $APP has no targetRevision helm parameter to keep in step; pin unchanged"
+      exit 1
+    fi
+
+    kubectl -n "$APP_NS" patch application "$APP" --type json -p "[
+      {\"op\": \"replace\", \"path\": \"/spec/source/targetRevision\", \"value\": \"$REVISION\"},
+      {\"op\": \"replace\", \"path\": \"/spec/source/helm/parameters/$IDX/value\", \"value\": \"$REVISION\"}
+    ]" >/dev/null
+
+    # One line per move, and it is the box's own record of why it changed —
+    # central logs the answer it gave, this logs that it was applied.
+    echo "MOVED $APP $CURRENT -> $REVISION (channel ${CHANNEL:-unknown})"

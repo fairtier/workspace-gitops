@@ -1,0 +1,46 @@
+# Desired on-box databases — the SINGLE source of truth for the
+# ensure-databases hook, deliberately kept as a NORMAL (non-hook) resource.
+#
+# Why a ConfigMap and not inline in the Job: ensure-databases-job.yaml is an
+# ArgoCD *Sync hook*, and ArgoCD excludes hook resources from its diff /
+# sync-status calculation. So editing the database list *inside* the hook
+# never makes the app OutOfSync, auto-sync never fires, and the hook never
+# re-runs — existing boxes silently miss the new database until a manual
+# `argocd app sync` (this bit the Phase 2C `workspace` DB on the canary box,
+# 2026-07-24). Holding the mutable list here instead means adding a database
+# changes a DIFFED resource: the app goes OutOfSync, auto-sync runs, and the
+# Sync hook (recreated every sync via BeforeHookCreation) reads the new list.
+# Same shape the workspace-db app already uses for its migrations ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-databases
+  labels:
+    app: postgres-ensure-databases
+  annotations:
+    # Wave 0 (with the StatefulSet), so the updated list is applied before the
+    # wave-1 ensure-databases hook reads it.
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  ensure-databases.sql: |
+    -- CREATE-if-absent for each wanted database. Adding a row here is a
+    -- diffed change (see this file's header), so it reaches existing boxes on
+    -- the next sync without a manual one.
+    SELECT format('CREATE DATABASE %I', datname)
+    FROM (VALUES
+      ('casdoor'),
+      ('openfga'),
+      ('lakekeeper'),
+      ('gitea'),
+      -- The dlt-worker's local run recording (apps/box/workspace-db owns
+      -- its schema).
+      ('workspace'),
+      -- The box workspace API's own database (apps/box/workspace-api;
+      -- the binary migrates it). Deliberately NOT the `workspace` one
+      -- above: two golang-migrate lineages must never share a single
+      -- schema_migrations table. They converge in Phase 3D.
+      ('workspace_api')
+    ) AS wanted(datname)
+    WHERE NOT EXISTS (
+      SELECT FROM pg_database WHERE pg_database.datname = wanted.datname
+    )\gexec

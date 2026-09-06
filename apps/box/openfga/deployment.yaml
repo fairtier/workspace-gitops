@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openfga
+  labels:
+    app: openfga
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  # Single replica — one-customer box (shared platform runs 2 for HA).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openfga
+  template:
+    metadata:
+      labels:
+        app: openfga
+    spec:
+      containers:
+        - name: openfga
+          # Pin mirrors the central OpenFGA.
+          image: openfga/openfga:v1.17.1
+          args: ["run"]
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: postgres
+            - name: OPENFGA_DATASTORE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: openfga-postgres
+                  key: datastore-uri
+            - name: OPENFGA_HTTP_ADDR
+              value: 0.0.0.0:8080
+            - name: OPENFGA_GRPC_ADDR
+              value: 0.0.0.0:8081
+            - name: OPENFGA_PLAYGROUND_ENABLED
+              value: "false"
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8081
+              name: grpc
+            - containerPort: 2112
+              name: metrics
+          # Request tracks measured usage (~26Mi / 3m steady on a box), not a
+          # round number. On a 3.7Gi single-node box a request is a claim on
+          # scarce scheduling headroom, and an idle 256Mi reservation is taken
+          # from whatever needs it next — here it was starving the nightly
+          # iceberg-maintenance CronJob's 256Mi and forcing ArgoCD to run
+          # BestEffort. The limit stays generous: bounding the blast radius of
+          # a runaway is still worth it, and limits cost nothing while unused.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 48Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3

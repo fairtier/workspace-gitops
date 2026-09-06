@@ -1,0 +1,93 @@
+# The workspace Console. Stateless static-file serving plus /config.json —
+# single replica is plenty for a one-customer box.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+  labels:
+    app: console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: console
+  template:
+    metadata:
+      labels:
+        app: console
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # NUMERIC uid required: the image's USER is the NAME `bun` (uid
+        # 1000), and runAsNonRoot cannot verify a name — the pod dies as
+        # CreateContainerConfigError with no logs. Same trap as the
+        # distroless images, different uid.
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: console
+          image: {{ .Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # The whole per-box contract: served to the SPA as /config.json
+            # by server.ts, which exits 1 naming whichever of these is
+            # missing. Values mirror what workspace-api advertises at
+            # /.well-known/fairtier-workspace — same slug, same seed Job.
+            - name: FT_WORKSPACE_API_URL
+              value: "https://api.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+            - name: FT_AUTH_URL
+              value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+            # The box Casdoor `console` application — a PKCE public client,
+            # so the id is the only half the browser ever needs. Minted by
+            # the workspace-api seed Job (create-if-absent), which also
+            # registered this exact redirect URI up front so this deploy
+            # needs no Casdoor edit.
+            - name: FT_AUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: console-oidc
+                  key: client-id
+            - name: FT_AUTH_REDIRECT_URI
+              value: "https://console.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/callback"
+            # BARE slug: the box Casdoor org is `<slug>` — the "customer-"
+            # prefix belongs to the domain (see the workspace-api
+            # deployment's longer version of this note).
+            - name: FT_AUTH_ORGANIZATION
+              value: {{ .Values.slug | quote }}
+            {{- if .Values.accountUrl }}
+            - name: FT_ACCOUNT_URL
+              value: {{ .Values.accountUrl | quote }}
+            {{- end }}
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            # Bun's runtime scratch space under a read-only root.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

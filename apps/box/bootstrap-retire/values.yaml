@@ -1,0 +1,18 @@
+# kubectl + bash. The same seed image every other box Job uses, so it is
+# already in the node's image store — this app pulls nothing new.
+image: alpine/k8s:1.33.13
+
+# k3s auto-deploy directory. Contains k3s's OWN packaged components
+# (traefik, coredns, local-storage, metrics-server) as well as the three
+# fairtier-*.yaml files cloud-init writes — which is why the script names
+# its three files explicitly and never globs.
+manifestsDir: /var/lib/rancher/k3s/server/manifests
+
+# Daily convergence, deliberately BEFORE the 03:30 unattended-upgrades
+# reboot window (cloud-init's 52fairtier-unattended) and clear of
+# iceberg-maintenance (02:30) and box-backup (03:30). The Sync-hook Job
+# covers the immediate case (a ring rollout, an edit to the script); this
+# covers the one it cannot — a box whose guards were not yet satisfied at
+# the sync that created this app, which would otherwise wait for the next
+# git change to this path.
+schedule: "7 2 * * *"

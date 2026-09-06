@@ -1,0 +1,45 @@
+# The immediacy half: run once per sync so a fresh box — or a box whose
+# mapping just changed in git — gets its Secrets now instead of at the next
+# CronJob tick. The CronJob is what guarantees convergence; this is what makes
+# the common case fast.
+#
+# Wave -1, ahead of the consumers in wave 0+, so a Secret this Job writes is
+# already there when the Deployment that mounts it starts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: box-secrets-initial-sync
+  labels:
+    app: box-secrets
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: box-secrets
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: box-secrets
+      containers:
+        - name: sync
+          image: {{ .Values.seedImage }}
+          command: ["/bin/sh", "/config/sync.sh"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: box-secrets-config
+            defaultMode: 0555

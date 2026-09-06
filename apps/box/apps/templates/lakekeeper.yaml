@@ -1,0 +1,66 @@
+# Lakekeeper Iceberg REST catalog — same upstream chart + values shape as the
+# frozen shared-cluster path, adapted for on-box: external DB = on-box postgres, OIDC = on-box Casdoor,
+# ingress = Traefik + cert-manager instead of the shared Gateway API route.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lakekeeper
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/name: lakekeeper
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://lakekeeper.github.io/lakekeeper-charts/
+      chart: lakekeeper
+      targetRevision: "{{ .Values.lakekeeperChartVersion }}"
+      helm:
+        releaseName: lakekeeper
+        valueFiles:
+          - $values/apps/box/lakekeeper/values.yaml
+        parameters:
+          # Hostname-dependent: on-box Casdoor is the OIDC provider.
+          - name: auth.oauth2.providerUri
+            value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+          # The same provider, spelled as the document Lakekeeper fetches at
+          # startup and exits 1 on if it cannot parse. The wait-for-oidc
+          # initContainer defined in apps/box/lakekeeper/values.yaml polls it
+          # until Casdoor is serving real JSON, so a Casdoor restart delays the
+          # catalog's start instead of crashlooping it for ~45 minutes
+          # (2026-08-27). BY INDEX into that values file's list — the container
+          # must stay first, and OIDC_DISCOVERY_URL first in its env.
+          - name: catalog.extraInitContainers[0].env[0].value
+            value: "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/.well-known/openid-configuration"
+    - repoURL: "{{ .Values.repoURL }}"
+      targetRevision: "{{ .Values.targetRevision }}"
+      ref: values
+    - repoURL: "{{ .Values.repoURL }}"
+      targetRevision: "{{ .Values.targetRevision }}"
+      path: apps/box/lakekeeper/ingress
+      helm:
+        releaseName: lakekeeper-ingress
+        parameters:
+          - name: slug
+            value: "{{ .Values.slug }}"
+          - name: baseDomain
+            value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

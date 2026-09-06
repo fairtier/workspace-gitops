@@ -1,0 +1,52 @@
+# RBAC for the seed Job (seed-job.yaml). Wave -2: must exist before the
+# wave -1 hook pod starts, or the very first sync deadlocks waiting on a
+# ServiceAccount that only a later wave would apply.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-api-seed
+  labels:
+    app: workspace-api-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-api-seed
+  labels:
+    app: workspace-api-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  # `get` is name-scoped; `create` cannot be (K8s RBAC limitation) but the
+  # Job only ever creates workspace-api-crypto, workspace-api-oauth-state and
+  # console-oidc.
+  #
+  # Every Secret the Job reads must be listed here. A missing name does not
+  # read as absent — it reads as Forbidden, which secret_absent refuses to
+  # treat as "create it" precisely because that mistake cost a crash loop
+  # once already (rill-seed, rill-snapshot-auth).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["workspace-api-crypto", "workspace-api-oauth-state", "console-oidc"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-api-seed
+  labels:
+    app: workspace-api-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-api-seed
+subjects:
+  - kind: ServiceAccount
+    name: workspace-api-seed

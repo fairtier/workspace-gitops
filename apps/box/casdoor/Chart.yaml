@@ -1,0 +1,9 @@
+apiVersion: v2
+name: box-casdoor
+description: >-
+  Per-box Casdoor OIDC provider. Deployment shape mirrors the central
+  Casdoor; per-customer state (init_data.json seed, DB DSN) comes from
+  cloud-init-written Secrets in fairtier-system.
+type: application
+version: 0.1.0
+appVersion: "3.153.0"

@@ -1,0 +1,56 @@
+# Schema migrations for the box-local `workspace` database — the box side of
+# the control-plane/workspace-plane state inversion (Phase 2C).
+#
+# The dlt-worker writes run history here locally-first (WORKSPACE_DB_URL);
+# Phase 3's on-box workspace API inherits the same schema_migrations table.
+# Policy: migrations are ADDITIVE-ONLY (a rolled-forward pin means the only
+# box is production) and column-compatible with the central pipeline_runs /
+# transformation_runs tables so run-history code is shared across planes.
+#
+# pipeline_id / transformation_id are plain UUIDs, no FK: on the box the
+# definitions live in the Gitea `pipelines` / `transformations` repos, not
+# in Postgres.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workspace-db-migrations
+  labels:
+    app: workspace-db
+data:
+  000001_pipeline_runs.up.sql: |
+    CREATE TABLE pipeline_runs (
+        id UUID PRIMARY KEY,
+        pipeline_id UUID NOT NULL,
+        status TEXT NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        rows_loaded BIGINT NOT NULL DEFAULT 0,
+        error_message TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX idx_pipeline_runs_pipeline_id
+        ON pipeline_runs(pipeline_id, created_at DESC);
+  000001_pipeline_runs.down.sql: |
+    DROP TABLE pipeline_runs;
+  000002_transformation_runs.up.sql: |
+    CREATE TABLE transformation_runs (
+        id UUID PRIMARY KEY,
+        transformation_id UUID NOT NULL,
+        status TEXT NOT NULL,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        commit_sha TEXT NOT NULL DEFAULT '',
+        models_total INTEGER NOT NULL DEFAULT 0,
+        models_failed INTEGER NOT NULL DEFAULT 0,
+        tests_total INTEGER NOT NULL DEFAULT 0,
+        tests_failed INTEGER NOT NULL DEFAULT 0,
+        model_results JSONB NOT NULL DEFAULT '[]',
+        error_message TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX idx_transformation_runs_transformation_id
+        ON transformation_runs(transformation_id, created_at DESC);
+  000002_transformation_runs.down.sql: |
+    DROP TABLE transformation_runs;

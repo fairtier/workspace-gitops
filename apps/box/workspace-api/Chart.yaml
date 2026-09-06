@@ -1,0 +1,13 @@
+apiVersion: v2
+name: box-workspace-api
+description: >-
+  The workspace plane, running ON the box — the exit story made physical
+  (control-plane/workspace-plane split, Phase 3B). Serves the
+  product RPCs (pipelines, transformations, query, warehouse, snapshots,
+  box repo, notifications, demo) from box Postgres + box Gitea, with box
+  Casdoor as the only trusted issuer. Ships shadow: deployed and
+  reconciling, but no client is pointed at it until the Console's
+  workspace transport is (Phase 3C).
+type: application
+version: 0.1.0
+appVersion: "0.33.1" # tracks values.yaml `image`

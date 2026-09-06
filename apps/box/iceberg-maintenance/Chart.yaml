@@ -1,0 +1,25 @@
+apiVersion: v2
+name: box-iceberg-maintenance
+description: >-
+  Nightly Iceberg maintenance for the box warehouse — small-file compaction,
+  snapshot expiry and an orphan-file sweep. dlt's nightly append/merge loads
+  leave many small parquet files; nothing in the DuckDB/Lakekeeper stack
+  compacts them, so a CronJob rewrites each table with PyIceberg by streaming
+  the scan one data file at a time into fresh parquet (O(1) memory, no
+  whole-table materialization, no size cap) and expires snapshots past the
+  time-travel window (metadata-only). Expiry frees no storage on its own, so a
+  third pass sweeps the files no retained snapshot can reach any more — the
+  generation each compaction replaced, and the parquet a lost commit stranded.
+  That pass ships in dry-run (orphanSweep.mode): it is the only code here that
+  deletes customer data, so arming it is a per-box decision — the box's own
+  orphanSweepMaxDeletes parameter goes up, after that box's own dry-run
+  report has been read and `python -m iceberg_maintenance.verify` has proved
+  its live file set disjoint from the orphan set. Authenticates to the
+  on-box Lakekeeper as the
+  box-seeded dlt-worker Casdoor client (already a warehouse writer — same reuse
+  pattern as box-rill; per-app client is a worker-side follow-up) and
+  reads/writes data files with the cloud-init-staged fairtier-storage
+  credentials directly.
+type: application
+version: 0.13.0
+appVersion: "0.9.0" # ghcr.io/fairtier/iceberg-maintenance image (pins pyiceberg 0.11.1)

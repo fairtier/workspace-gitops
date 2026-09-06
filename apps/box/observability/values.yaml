@@ -1,0 +1,118 @@
+# Values for the UPSTREAM grafana/alloy chart (pinned via alloyChartVersion in
+# apps/box/apps/values.yaml — same 1.10.0 as the central cluster). Static by
+# design ($values files cannot be templated): everything per-box (slug,
+# baseDomain) lives in the rendered River config, which the config/ mini chart
+# ships as ConfigMap `alloy-config`.
+alloy:
+  configMap:
+    # Rendered by apps/box/observability/config (needs slug/baseDomain
+    # templating, which chart-inline values can't do).
+    create: false
+    name: alloy-config
+    key: config.alloy
+
+  # stats.grafana.org is unreachable from the cluster and the report retry
+  # loop blocks /-/ready (same incident as the central cluster).
+  enableReporting: false
+
+  mounts:
+    # Pod logs at /var/log/pods (k3s/containerd writes real files here).
+    varlog: true
+    extra:
+      # Fleet ingest basic-auth (cloud-init contract secret, ns observability).
+      - name: ingest-auth
+        mountPath: /etc/alloy-ingest
+        readOnly: true
+      # This box's Better Stack source token + ingesting host, written by
+      # apps/box/box-secrets. Mounted unconditionally and optionally: this file
+      # is static (a $values file cannot be templated), so it cannot follow the
+      # betterstack.enabled flag in config/values.yaml — and an optional volume
+      # for an absent Secret is simply empty, which costs nothing while the flag
+      # is off. The config only reads these paths once the flag is on.
+      - name: betterstack
+        mountPath: /etc/betterstack
+        readOnly: true
+      # Host filesystems for prometheus.exporter.unix (node metrics).
+      - name: host-root
+        mountPath: /host/root
+        readOnly: true
+        mountPropagation: HostToContainer
+      - name: host-proc
+        mountPath: /host/proc
+        readOnly: true
+      - name: host-sys
+        mountPath: /host/sys
+        readOnly: true
+
+  # OTLP gRPC receiver — DuckFlight points its OTel SDK at
+  # alloy.observability.svc.cluster.local:4317. All three signals are
+  # accepted and dropped on the box (v1); accepting them is what stops an
+  # SDK's default logs/metrics exporters from erroring at 1 Hz into stdout.
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+
+  # The one component whose request went UP in the 2026-08-10 rebalance:
+  # Alloy was measured at 195Mi against a 128Mi request, i.e. it was living
+  # in borrowed headroom and 76% of the way to its own limit. A request
+  # below measured usage is not a saving, it is an eviction candidate that
+  # takes the box's telemetry with it — precisely what one needs during the
+  # incident that triggers it. Sizing rule: ../README.md.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 200m
+      memory: 320Mi
+
+# The sidecar that reloads Alloy on a ConfigMap change. The chart defaults it
+# to 50Mi, which nobody chose for this box: seven days of working set put it at
+# avg 8Mi, p95 12Mi, max 18Mi. 50Mi standing for an 18Mi peak is the "round
+# numbers reserve 256Mi for a 26Mi process" failure from ../README.md, arriving
+# through a chart default rather than through us. 24Mi covers the max.
+#
+# And it gets a limit, unlike ArgoCD and Traefik. Those are unbounded on
+# purpose (apps/box/argocd, apps/box/traefik): a memcg kill of the component
+# that has to survive node pressure is the same outage as the node-wide kill a
+# limit prevents. That argument does not transfer here — killing the config
+# reloader costs nothing, Alloy keeps running on the config it already loaded
+# and the sidecar restarts. So this is the case where a limit is pure upside,
+# and 64Mi is 3.5x a 18Mi weekly max: an isolation backstop that should never
+# fire, not a size lever.
+configReloader:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+controller:
+  # Single-node box: DaemonSet = exactly one pod, and it survives node
+  # replacement semantics if the fleet ever grows multi-node.
+  type: daemonset
+  volumes:
+    extra:
+      - name: ingest-auth
+        secret:
+          secretName: alloy-ingest-auth
+      - name: betterstack
+        secret:
+          secretName: betterstack-telemetry
+          # optional is load-bearing: without it a box whose box-secrets sync
+          # has not run yet would have an unschedulable Alloy pod — i.e. adding
+          # an optional export would take out the box's entire telemetry.
+          optional: true
+      - name: host-root
+        hostPath:
+          path: /
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-sys
+        hostPath:
+          path: /sys

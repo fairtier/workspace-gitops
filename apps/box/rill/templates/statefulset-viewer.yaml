@@ -1,0 +1,183 @@
+# The read-only twin of statefulset.yaml: `rill start --preview` serves
+# dashboards without the code editor at dashboards.customer-<slug>. Rill's
+# mode is fixed at process startup and two instances can't share a project
+# dir (embedded DuckDB), so the viewer gets its own PVC seeded from the
+# same Gitea repo (fairtier-admin/rill). Publish flow: editor autosave →
+# Gitea → viewer sidecar ff-pull (≤ git.syncInterval) → Rill hot-reload.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rill-viewer
+  labels:
+    app: rill-viewer
+    tier: box
+spec:
+  serviceName: rill-viewer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rill-viewer
+      tier: box
+  template:
+    metadata:
+      labels:
+        app: rill-viewer
+        tier: box
+      annotations:
+        # Roll the pod when the project ConfigMap changes — the files are
+        # COPIED onto the PVC at boot, so without this, config edits sit
+        # in the ConfigMap while the pod keeps the copy it took last boot.
+        checksum/rill-project: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      # No container in this pod talks to the K8s API.
+      automountServiceAccountToken: false
+      # uid 1001 = Rill's user in rilldata/rill. Running every container
+      # (incl. the copy init) as 1001 keeps /project owned correctly with
+      # no root chown; fsGroup makes the PVC writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Open (or first time: adopt) /project as a clone of the on-box
+        # Gitea repo and fast-forward it if clean — same restore as the
+        # editor instance. MUST run before copy-project so the
+        # platform-managed overlay lands on top of the checkout.
+        - name: git-restore
+          image: {{ .Values.sidecarImage }}
+          args: ["restore"]
+          env:
+            {{- include "rill.gitEnv" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: project
+              mountPath: /project
+        # Overlay the ConfigMap project files on top of the PVC (git-managed
+        # config always wins; customer-authored files elsewhere in /project
+        # are left alone). The `..*` wipe removes K8s ConfigMap mount
+        # metadata (`..data`, `..2026_*`) that an earlier copy may have
+        # captured into /project — Rill scans them and reports a connector
+        # "name collision". `cp -RL /config/*` (glob skips hidden) never
+        # re-copies the mount internals.
+        - name: copy-project
+          image: {{ .Values.copyImage }}
+          command:
+            - sh
+            - -c
+            - "find /project -maxdepth 1 -name '..*' -exec rm -rf {} + 2>/dev/null; cp -RL /config/* /project/"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: rill-config
+              mountPath: /config
+              readOnly: true
+            - name: project
+              mountPath: /project
+      containers:
+        - name: rill
+          image: {{ .Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Same .env materialisation as the editor instance (Rill resolves
+          # `{{ "{{ .env.X }}" }}` from a project-root `.env` file, not
+          # container env). --preview drops the code editor: dashboard-only
+          # consumption of the same project.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              {
+                printf 'LAKEKEEPER_CLIENT_ID=%s\n'     "$LAKEKEEPER_CLIENT_ID"
+                printf 'LAKEKEEPER_CLIENT_SECRET=%s\n' "$LAKEKEEPER_CLIENT_SECRET"
+              } > /project/.env
+              exec rill start /project --preview --no-open
+          ports:
+            - containerPort: 9009
+              name: http
+          env:
+            # Rill's Lakekeeper catalog client — same secret as the edit
+            # instance (values.yaml icebergSecretsName).
+            - name: LAKEKEEPER_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.icebergSecretsName }}
+                  key: client-id
+            - name: LAKEKEEPER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.icebergSecretsName }}
+                  key: client-secret
+          volumeMounts:
+            - name: project
+              mountPath: /project
+          resources:
+            {{- toYaml .Values.viewer.resources | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: 9009
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9009
+            initialDelaySeconds: 10
+            periodSeconds: 5
+        # Pull-only: the sync loop fast-forwards published edits into
+        # /project (Rill hot-reloads) on the short viewer interval — this
+        # bounds publish latency after a save. Autosave is disabled
+        # (0 = off in the sidecar); --preview authors nothing non-ignored,
+        # so the editor instance stays the sole writer to the Gitea repo.
+        # No rill-snapshot-style Service either: TriggerSnapshot/
+        # sync-status only matter for the editor.
+        - name: snapshot
+          image: {{ .Values.sidecarImage }}
+          args: ["serve"]
+          env:
+            {{- include "rill.gitEnv" . | nindent 12 }}
+            - name: SYNC_INTERVAL
+              value: {{ .Values.viewer.syncInterval | quote }}
+            - name: AUTOSAVE_INTERVAL
+              value: "0"
+          ports:
+            - containerPort: 8484
+              name: snapshot
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: project
+              mountPath: /project
+          resources:
+            {{- toYaml .Values.sidecarResources | nindent 12 }}
+          livenessProbe:
+            grpc:
+              port: 8484
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: rill-config
+          configMap:
+            name: rill-project
+  volumeClaimTemplates:
+    - metadata:
+        name: project
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # No storageClassName: k3s default (local-path) — the box's own
+        # disk, same durability story as the postgres PVC (Phase-5 backups).
+        resources:
+          requests:
+            storage: {{ .Values.viewer.storage.projectSize }}

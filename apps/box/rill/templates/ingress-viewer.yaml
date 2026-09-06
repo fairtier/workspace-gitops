@@ -1,0 +1,30 @@
+# dashboards.customer-<slug>.<baseDomain> — the production (read-only) Rill
+# URL, backed by the viewer's own oauth2-proxy (oauth2-proxy-viewer.yaml).
+# Separate Ingress on purpose: keeps the one-cert-per-hostname convention
+# (rill-tls stays untouched on the live box). Covered by the wildcard
+# *.customer-<slug> DNS record — no Terraform DNS change needed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rill-viewer
+  labels:
+    app: rill-viewer
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "dashboards.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: rill-viewer-tls
+  rules:
+    - host: "dashboards.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rill-viewer-oauth2-proxy
+                port:
+                  number: 4180

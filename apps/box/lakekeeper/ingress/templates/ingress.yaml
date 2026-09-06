@@ -1,0 +1,30 @@
+# Public Lakekeeper endpoint — the FairTier API's worker talks to this URL
+# (bootstrap, warehouse + credential lifecycle), and so do customer clients.
+# Backend service `lakekeeper` port 8181 mirrors the shared cluster's
+# HTTPRoute. Certificate comes from ingress-shim via
+# the cluster-issuer annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lakekeeper
+  labels:
+    app.kubernetes.io/name: lakekeeper
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "lakekeeper.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: lakekeeper-tls
+  rules:
+    - host: "lakekeeper.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lakekeeper
+                port:
+                  number: 8181

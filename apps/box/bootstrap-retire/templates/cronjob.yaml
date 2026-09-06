@@ -1,0 +1,34 @@
+# Convergent path: the hook above only runs when this app syncs, and on a
+# freshly provisioned box the guards can still be unsatisfied at that moment
+# (the app-of-apps is syncing everything at once). Without a periodic run
+# such a box would keep its second writer until the next git change to this
+# path — through every reboot in between. Daily, before the unattended-
+# upgrades reboot window (see values.yaml).
+#
+# Once every sentinel is written each tick is a no-op that prints
+# "already retired" and exits, so this stays cheap forever.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bootstrap-retire
+  namespace: kube-system
+  labels:
+    app: bootstrap-retire
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # A box that was down over the scheduled minute retires at the next tick
+  # rather than firing a late catch-up run.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: bootstrap-retire
+        spec:
+          restartPolicy: Never
+          {{- include "box-bootstrap-retire.podSpec" . | nindent 10 }}

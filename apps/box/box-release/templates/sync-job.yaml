@@ -1,0 +1,47 @@
+# The immediacy half: ask once per sync, so a box that has just been told a new
+# revision — or one whose agent script itself changed — acts now instead of at
+# the next tick. The CronJob is what guarantees convergence; this is what makes
+# the common case fast.
+#
+# Wave -1, but nothing downstream depends on it: unlike the credential channel,
+# what this Job writes is the root Application itself, and the sync that
+# follows is ArgoCD's own. The wave only keeps it ahead of the CronJob it would
+# otherwise race.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: box-release-initial-sync
+  labels:
+    app: box-release
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: box-release
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: box-release
+      containers:
+        - name: sync
+          image: {{ .Values.image }}
+          command: ["/bin/sh", "/config/sync.sh"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: box-release-config
+            defaultMode: 0555

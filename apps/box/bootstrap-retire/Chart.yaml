@@ -1,0 +1,15 @@
+apiVersion: v2
+name: box-bootstrap-retire
+description: >-
+  Retires the box's cloud-init k3s auto-deploy manifests once GitOps owns
+  what they delivered, by writing k3s `.skip` sentinels next to them.
+  Without this, every object cloud-init wrote has two writers: the frozen
+  provisioning-day file (k3s re-applies the whole directory at EVERY k3s
+  start, not just the first) and the GitOps twin that owns it day-2 — with
+  the frozen one running last. That is why an ArgoCD QoS fix reverted on a
+  `systemctl restart k3s`, and why rotating the repo deploy token, moving a
+  box to a new revision, or rotating a contract Secret would not stick
+  on a legacy box. `.skip` is non-destructive by design: k3s stops applying
+  the file and leaves everything it already created alone.
+type: application
+version: 0.1.0

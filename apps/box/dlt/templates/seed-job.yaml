@@ -1,0 +1,477 @@
+# Box-local seeding — the day-2-safe alternative to cloud-init secrets
+# (apps/box/README.md, "Day-2 changes"). The dlt-worker OIDC client (Secret
+# dlt-oidc) is owned by casdoor-seed (apps/box/casdoor/values.yaml
+# initDataApplications) because its client-id must be in Lakekeeper's
+# audience list. This Job owns the Gitea side of the state sync plus the box
+# age keypair.
+#
+# Wave -1 Sync hook (RBAC at -2), idempotent:
+#   1. create the Gitea repo `dlt` + seed README/.gitignore if absent, and
+#      mint the sidecar access token into Secret dlt-git if absent (Gitea
+#      admin credentials from gitea-secrets);
+#   2. create the Gitea repo `transformations` (the customer's hosted dbt
+#      project) + seed the starter dbt
+#      project if absent, and mint the worker's read-only clone token into
+#      Secret transformations-git if absent. profiles.yml is absent from the
+#      template BY DESIGN — the worker generates it at run time from box
+#      credentials, so cloning the repo leaks nothing.
+#   3. create the Gitea repo `pipelines` (rendered DLT pipeline
+#      definitions) + seed README if absent, and mint
+#      the read-only clone token into Secret pipelines-git if absent
+#      (Phase 2: the pipelines-restore/-sync containers pull the checkout
+#      the worker schedules from). The box's own workspace-api writes it,
+#      with the platform-editor token from rill seed step 4.
+#   4. box age keypair (Phase 3, localized credentials): the agekey init
+#      container (the worker image) generates it into an emptyDir; this
+#      step turns it into Secret dlt-age if absent. Neither half leaves the
+#      box now — the box workspace-api reads the public key from this Secret
+#      and encrypts source credentials to it (split Phase 3E retired the
+#      deposit that used to hand it to central).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dlt-seed
+  labels:
+    app: dlt-seed
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: dlt-seed
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: dlt-seed
+      initContainers:
+        # Generate the box age keypair into the pod-local emptyDir. The
+        # worker image carries the generator (pyrage is its decrypt dep);
+        # alpine/k8s has no age tooling and runtime downloads are banned.
+        # Guarded for pod restarts: the generator itself refuses to
+        # overwrite an existing key.txt. If Secret dlt-age already exists,
+        # step 4 simply discards this fresh pair.
+        - name: agekey
+          image: {{ .Values.image }}
+          command:
+            - /bin/sh
+            - -c
+            - '[ -f /age-seed/key.txt ] || python -m dlt_worker.agekey /age-seed'
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: age-seed
+              mountPath: /age-seed
+      containers:
+        - name: seed
+          image: {{ .Values.seedImage }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              # --- 1. Gitea: dlt repo + sidecar token ---------------------
+              # dlt's execution state lives in a private repo under the
+              # fixed Gitea admin (apps/box/gitea seed). The snapshot
+              # sidecar clones/pushes it with a scoped access token stored
+              # in Secret dlt-git (create-if-absent — Gitea tokens cannot
+              # be read back).
+              GITEA=http://gitea:3000
+
+              i=0
+              until curl -sf "$GITEA/api/healthz" >/dev/null || [ "$i" -ge 60 ]; do
+                echo "Waiting for Gitea..."
+                i=$((i + 1))
+                sleep 5
+              done
+              curl -sf "$GITEA/api/healthz" >/dev/null
+
+              # gitea-secrets exists once Gitea is healthy (its StatefulSet
+              # consumes it), so read AFTER the wait.
+              GITEA_USER=$(kubectl get secret gitea-secrets -o jsonpath='{.data.admin-username}' | base64 -d)
+              GITEA_PASS=$(kubectl get secret gitea-secrets -o jsonpath='{.data.admin-password}' | base64 -d)
+
+              if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/dlt" >/dev/null; then
+                echo "Gitea repo dlt already exists"
+              else
+                curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"dlt","private":true,"default_branch":"main","auto_init":false,"description":"dlt pipeline state - incremental cursors and schemas, synced from the box"}' \
+                  "$GITEA/api/v1/user/repos" >/dev/null
+                echo "Gitea repo dlt created"
+              fi
+
+              # Seed README + .gitignore create-if-absent. The contents API
+              # creates the default branch on an empty repo. Only the
+              # meaningful state is committed (per-pipeline state.json +
+              # schemas/); run artifacts — binary trace pickles and load/
+              # normalize packages that stage extracted data — stay on the
+              # PVC. Most patterns have no leading slash, so they match
+              # inside each per-pipeline directory.
+              # `scheduler.json` (repo-root, matches at any depth): the
+              # worker's files-mode last_run_at map. It gets a timestamp
+              # bump on EVERY successful run, so committing it produced a
+              # valueless snapshot-sidecar commit per run (a pure timestamp
+              # diff) — pure git noise. It stays on the PVC instead; losing
+              # it (fresh-box/disk-loss restore) is benign — at most one
+              # extra run per pipeline, deduped by the committed cursors in
+              # state.json. Break-glass cursor resets still go through the
+              # committed state.json.
+              # NB: not `path=` — that name is special in zsh (tied to
+              # PATH) and this snippet gets pasted into ops shells.
+              seed_file() {
+                repo=$1; fname=$2; b64=$3; msg=$4
+                if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/repos/$GITEA_USER/$repo/contents/$fname?ref=main" >/dev/null; then
+                  echo "$repo/$fname already seeded"
+                else
+                  curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content\":\"$b64\",\"message\":\"$msg\",\"branch\":\"main\"}" \
+                    "$GITEA/api/v1/repos/$GITEA_USER/$repo/contents/$fname" >/dev/null
+                  echo "$repo/$fname seeded"
+                fi
+              }
+
+              GITIGNORE_B64=$(printf '%s\n' \
+                'trace.pickle' 'load/' 'normalize/' 'tmp/' '..*' \
+                'scheduler.json' | base64 -w0)
+              README_B64=$(base64 -w0 <<'EOF'
+              # dlt pipeline state
+
+              Machine-owned execution state of your data pipelines, synced
+              from the box after each run: `<pipeline>/state.json` holds the
+              incremental cursors, `<pipeline>/schemas/` the inferred table
+              schemas. The pipeline definitions themselves are managed in
+              the FairTier Console, not here.
+
+              Treat this repo as read-mostly. Editing `state.json` (e.g.
+              resetting an incremental cursor) is supported break-glass
+              surgery — the box pulls it within minutes, but only while its
+              own copy has no unpushed changes; conflicting saves are never
+              forced (they surface as status `remote_changed`).
+              EOF
+              )
+              seed_file dlt ".gitignore" "$GITIGNORE_B64" "seed: .gitignore"
+              seed_file dlt "README.md" "$README_B64" "seed: README"
+
+              # Absent-vs-forbidden matters: the mint path REVOKES the named
+              # Gitea token before re-minting, so treating an RBAC error as
+              # "absent" rotates the token while the create then fails on
+              # AlreadyExists — leaving a Secret with a dead token (bitten
+              # live when transformations-git was missing from the seed
+              # Role's resourceNames). Only NotFound may take the mint path.
+              secret_absent() {
+                out=$(kubectl get secret "$1" 2>&1 >/dev/null) && return 1
+                echo "$out" | grep -qi "notfound" && return 0
+                echo "secret get $1 failed (not NotFound): $out" >&2
+                exit 1
+              }
+
+              if ! secret_absent dlt-git; then
+                echo "dlt-git already exists"
+              else
+                # A half-seeded run may have left a token we cannot read
+                # back — delete by name before minting a fresh one.
+                curl -sf -X DELETE -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens/dlt-sidecar" || true
+                TOKEN=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"dlt-sidecar","scopes":["write:repository"]}' \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens" | jq -r '.sha1')
+                if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                  echo "token creation failed" >&2
+                  exit 1
+                fi
+                kubectl create secret generic dlt-git \
+                  --from-literal=username="$GITEA_USER" \
+                  --from-literal=token="$TOKEN"
+                echo "dlt-git created"
+              fi
+
+              # --- 2. Gitea: transformations repo (hosted dbt project) ----
+              # The customer's dbt project — customer-authored code, seeded
+              # from a starter template. Unlike the machine-owned dlt state
+              # repo, this one is meant to be cloned and pushed by the
+              # customer; the worker only ever clones it (read-only token).
+              if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/transformations" >/dev/null; then
+                echo "Gitea repo transformations already exists"
+              else
+                curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"transformations","private":true,"default_branch":"main","auto_init":false,"description":"dbt transformations - staging and marts models built from your raw tables"}' \
+                  "$GITEA/api/v1/user/repos" >/dev/null
+                echo "Gitea repo transformations created"
+              fi
+
+              # Starter dbt project, create-if-absent per file so customer
+              # edits are never overwritten. profiles.yml is deliberately
+              # NOT part of the template (and gitignored): the box worker
+              # generates it at run time, so no credential ever lands here.
+              T_README_B64=$(base64 -w0 <<'EOF'
+              # Transformations (dbt)
+
+              Your dbt project. Models under `models/` are built into your
+              warehouse (the `lake` catalog) by the box worker: staging and
+              marts schemas from the raw tables your pipelines load.
+
+              How it runs: the worker clones this repo at the configured
+              ref, generates `profiles.yml` from the box's own credentials
+              (that file must never be committed here), and executes
+              `dbt build`. Each run is pinned to the commit SHA it checked
+              out, so every table state maps to an exact code version.
+
+              Edit `models/sources.yml.example` (rename to `sources.yml`)
+              to point at the schemas your pipelines load — the schema name
+              is the pipeline's dataset name — then reference them from
+              staging models with dbt's source() function.
+
+              This is a plain git repo: clone it, push to it, or move it to
+              your own git hosting whenever you like. The project runs
+              anywhere dbt-duckdb runs.
+              EOF
+              )
+              T_GITIGNORE_B64=$(printf '%s\n' \
+                'target/' 'dbt_packages/' 'logs/' 'profiles.yml' | base64 -w0)
+              T_PROJECT_B64=$(base64 -w0 <<'EOF'
+              name: 'fairtier'
+              version: '1.0.0'
+              # The profile is generated by the FairTier worker at run time —
+              # never commit a profiles.yml to this repo.
+              profile: 'fairtier'
+
+              model-paths: ["models"]
+              macro-paths: ["macros"]
+
+              models:
+                fairtier:
+                  # `lake` is your Iceberg warehouse (attached by the worker).
+                  +database: lake
+                  +materialized: table
+                  staging:
+                    +schema: staging
+                  marts:
+                    +schema: marts
+              EOF
+              )
+              # Custom schemas as-is ("marts", not "main_marts") — the usual
+              # override of dbt's default prefixing. The Jinja braces are
+              # Helm-escaped with a raw-string block so they reach the file
+              # verbatim.
+              T_MACRO_B64=$(base64 -w0 <<'EOF'
+              {{`{% macro generate_schema_name(custom_schema_name, node) -%}
+                  {%- if custom_schema_name is none -%}
+                      {{ target.schema }}
+                  {%- else -%}
+                      {{ custom_schema_name | trim }}
+                  {%- endif -%}
+              {%- endmacro %}`}}
+              EOF
+              )
+              # Attached Iceberg catalogs can neither RENAME a just-written
+              # table (breaks dbt's default tmp-table + rename swap) nor
+              # CREATE a table dropped in the same transaction — validated
+              # live on the box, both directions. This override replaces the
+              # built-in table materialization with an autocommitted drop +
+              # create. Non-atomic, but derived tables are rebuildable by
+              # definition.
+              T_TABLE_MAT_B64=$(base64 -w0 <<'EOF'
+              {{`{% materialization table, adapter="duckdb" %}
+                {%- set existing_relation = load_cached_relation(this) -%}
+                {%- set target_relation = this.incorporate(type='table') %}
+                {% set grant_config = config.get('grants') %}
+
+                {{ run_hooks(pre_hooks, inside_transaction=False) }}
+
+                {%- if existing_relation is not none -%}
+                  {% call statement('drop_existing', auto_begin=False) -%}
+                    drop table if exists {{ existing_relation }}
+                  {%- endcall %}
+                {%- endif -%}
+
+                {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
+                {% call statement('main') -%}
+                  {{ create_table_as(False, target_relation, compiled_code) }}
+                {%- endcall %}
+
+                {{ run_hooks(post_hooks, inside_transaction=True) }}
+                {% set should_revoke = should_revoke(existing_relation, full_refresh_mode=True) %}
+                {% do apply_grants(target_relation, grant_config, should_revoke=should_revoke) %}
+                {% do persist_docs(target_relation, model) %}
+                {{ adapter.commit() }}
+                {{ run_hooks(post_hooks, inside_transaction=False) }}
+                {{ return({'relations': [target_relation]}) }}
+              {% endmaterialization %}`}}
+              EOF
+              )
+              # Self-contained staging -> marts pair so the very first run
+              # succeeds (and demonstrates the DAG) before any sources are
+              # wired up.
+              T_STAGING_B64=$(base64 -w0 <<'EOF'
+              -- Replace me: real staging models select from your raw
+              -- sources (see sources.yml.example).
+              select 1 as id, 'hello from dbt' as note
+              EOF
+              )
+              T_MODEL_B64=$(base64 -w0 <<'EOF'
+              {{`select * from {{ ref('stg_example') }}`}}
+              EOF
+              )
+              T_SCHEMA_B64=$(base64 -w0 <<'EOF'
+              version: 2
+
+              models:
+                - name: example
+                  description: "Starter model - replace with your marts."
+                  columns:
+                    - name: id
+                      data_tests:
+                        - unique
+                        - not_null
+              EOF
+              )
+              T_SOURCES_B64=$(base64 -w0 <<'EOF'
+              # Rename this file to sources.yml and point it at the schemas
+              # your pipelines load (schema = the pipeline's dataset name).
+              version: 2
+
+              sources:
+                - name: raw
+                  database: lake
+                  schema: my_dataset  # <- your pipeline's dataset name
+                  tables:
+                    - name: my_table
+              EOF
+              )
+              seed_file transformations ".gitignore" "$T_GITIGNORE_B64" "seed: .gitignore"
+              seed_file transformations "README.md" "$T_README_B64" "seed: README"
+              seed_file transformations "dbt_project.yml" "$T_PROJECT_B64" "seed: dbt_project.yml"
+              seed_file transformations "macros/generate_schema_name.sql" "$T_MACRO_B64" "seed: schema-name macro"
+              seed_file transformations "macros/materialization_table.sql" "$T_TABLE_MAT_B64" "seed: iceberg-safe table materialization"
+              seed_file transformations "models/staging/stg_example.sql" "$T_STAGING_B64" "seed: staging example"
+              seed_file transformations "models/marts/example.sql" "$T_MODEL_B64" "seed: example model"
+              seed_file transformations "models/marts/schema.yml" "$T_SCHEMA_B64" "seed: example tests"
+              seed_file transformations "models/sources.yml.example" "$T_SOURCES_B64" "seed: sources example"
+
+              if ! secret_absent transformations-git; then
+                echo "transformations-git already exists"
+              else
+                # Same half-seeded-token recovery as dlt-git above. Scope is
+                # read-only: the worker clones, it never pushes.
+                curl -sf -X DELETE -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens/transformations-worker" || true
+                TOKEN=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"transformations-worker","scopes":["read:repository"]}' \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens" | jq -r '.sha1')
+                if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                  echo "token creation failed" >&2
+                  exit 1
+                fi
+                kubectl create secret generic transformations-git \
+                  --from-literal=username="$GITEA_USER" \
+                  --from-literal=token="$TOKEN"
+                echo "transformations-git created"
+              fi
+
+              # --- 3. Gitea: pipelines repo (rendered definitions) ---------
+              # Pipeline definitions rendered by the Console (pipelines-as-
+              # files). Platform-written — the box workspace-api pushes with
+              # the platform-editor token, so no .gitignore. The worker reads
+              # with the read-only token minted below (Phase 2: it schedules
+              # from this checkout).
+              if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/pipelines" >/dev/null; then
+                echo "Gitea repo pipelines already exists"
+              else
+                curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"pipelines","private":true,"default_branch":"main","auto_init":false,"description":"dlt pipeline definitions - rendered from the FairTier Console"}' \
+                  "$GITEA/api/v1/user/repos" >/dev/null
+                echo "Gitea repo pipelines created"
+              fi
+
+              P_README_B64=$(base64 -w0 <<'EOF'
+              # Pipeline definitions
+
+              Your data pipelines as files, one `pipelines/<name>.yaml` per
+              pipeline, rendered by the FairTier Console on every save. The
+              Console is the source of truth today: editing a file here is
+              legal, but the next Console save of that pipeline overwrites
+              it. Conflicting writes are never forced.
+
+              Source credentials appear here only as age-encrypted
+              `pipelines/<name>.credentials.age` files — never in
+              plaintext. They are encrypted to this box's public key; the
+              matching private key exists only on the box, so cloning or
+              mirroring this repo leaks nothing.
+              EOF
+              )
+              seed_file pipelines "README.md" "$P_README_B64" "seed: README"
+
+              if ! secret_absent pipelines-git; then
+                echo "pipelines-git already exists"
+              else
+                # Same half-seeded-token recovery as dlt-git above. Scope is
+                # read-only: the pipelines-restore/-sync containers pull the
+                # checkout; nothing on the box ever pushes here (definitions
+                # flow one way, Console -> box).
+                curl -sf -X DELETE -u "$GITEA_USER:$GITEA_PASS" \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens/pipelines-worker" || true
+                TOKEN=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                  -H "Content-Type: application/json" \
+                  -d '{"name":"pipelines-worker","scopes":["read:repository"]}' \
+                  "$GITEA/api/v1/users/$GITEA_USER/tokens" | jq -r '.sha1')
+                if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                  echo "token creation failed" >&2
+                  exit 1
+                fi
+                kubectl create secret generic pipelines-git \
+                  --from-literal=username="$GITEA_USER" \
+                  --from-literal=token="$TOKEN"
+                echo "pipelines-git created"
+              fi
+
+              # --- 4. Box age keypair --------------------------------------
+              # The agekey init container generated a fresh pair into
+              # /age-seed; adopt it only if the durable Secret is absent
+              # (create-if-absent like the tokens above — the Secret is the
+              # key's only home, there is no rotation path here).
+              if ! secret_absent dlt-age; then
+                echo "dlt-age already exists"
+              else
+                kubectl create secret generic dlt-age \
+                  --from-file=key.txt=/age-seed/key.txt \
+                  --from-file=public-key=/age-seed/key.pub
+                echo "dlt-age created"
+              fi
+
+              # The public key is NOT deposited to central any more (split
+              # Phase 3E). Central used to render
+              # pipelines/<name>.credentials.age from it; the box's own
+              # workspace-api does that now, reading the same Secret as
+              # BOX_AGE_PUBLIC_KEY. The private half never left the box either
+              # way — what changed is that the public half no longer has to.
+          volumeMounts:
+            - name: age-seed
+              mountPath: /age-seed
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        # Pod-local hand-off from the agekey init container to step 4;
+        # discarded with the pod (the Secret is the durable home).
+        - name: age-seed
+          emptyDir: {}

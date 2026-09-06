@@ -1,0 +1,54 @@
+# Schema migrations — run as an ArgoCD Sync hook so the (immutable) Job is
+# recreated on every sync instead of fighting the previous instance.
+# `openfga migrate` is idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openfga-migrate
+  labels:
+    app: openfga-migrate
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: openfga-migrate
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h postgresql.fairtier-system.svc.cluster.local -U postgres; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: migrate
+          image: openfga/openfga:v1.17.1
+          args: ["migrate"]
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: postgres
+            - name: OPENFGA_DATASTORE_URI
+              valueFrom:
+                secretKeyRef:
+                  # Written by cloud-init (full postgres URI incl. password,
+                  # database "openfga" — created by the postgres
+                  # ensure-databases Job).
+                  name: openfga-postgres
+                  key: datastore-uri
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

@@ -1,0 +1,29 @@
+# git.customer-<slug>.<baseDomain> via the k3s built-in Traefik.
+# cert-manager's ingress-shim creates the Certificate from the annotation
+# (one Certificate/Ingress per exposed hostname). Covered by the wildcard
+# *.customer-<slug> DNS record — no Terraform DNS change needed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitea
+  labels:
+    app: gitea
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "git.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: gitea-tls
+  rules:
+    - host: "git.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitea
+                port:
+                  number: 3000

@@ -1,0 +1,140 @@
+# slug + baseDomain are injected by the app-of-apps
+# (apps/box/apps/templates/rill.yaml); placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+# Same tag as the (frozen) shared path — the DuckDB/iceberg conn_init_sql
+# in configmap.yaml was hand-validated against this image there. No :latest.
+image: rilldata/rill:v0.87.2
+# Copies the ConfigMap project files onto the PVC (shared-path pattern).
+copyImage: busybox:1.38
+# OIDC gate in front of Rill (`rill start` has no auth of its own; the
+# shared path used an Envoy SecurityPolicy — Traefik OSS has no OIDC
+# filter, so the box fronts Rill with oauth2-proxy instead).
+oauth2ProxyImage: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+# Deploy-button interceptor proxy. Sits between oauth2-proxy and rill:9009;
+# when enabled, oauth2-proxy's --upstream points at it (else straight at
+# rill:9009). Source + build live in their own GitHub repo
+# (github.com/fairtier/rill-deploy-shim), published to public GHCR by GitHub
+# Actions — boxes have no private-registry pull secret. No :latest.
+#
+# enabled MUST stay false until the pinned image tag actually exists on GHCR:
+# the shim is in Rill's request path, so a missing image = ImagePullBackOff =
+# oauth2-proxy has no upstream = 502. Release order: push git tag `v<semver>`
+# in the shim repo → confirm the image is public and pullable → flip enabled.
+# 0.0.2 handles SIGTERM. Before it, the shim was PID 1 with no signal handler,
+# so Linux ignored the default disposition and Go's dieFromSignal fell through
+# to its exit(2) fallback: every routine kubelet stop was logged as
+# "Error (exit 2)" with no message. That is what made a box's 204 restarts
+# read as a crashloop when they were really the node-wide memory-pressure
+# cascade restarting coredns/metrics-server/traefik alongside it. 0.0.2 also
+# drains in-flight requests instead of cutting them.
+# 0.0.3 is a rebuild with no behaviour change: the shim's Dockerfile pinned a
+# full patch version of Go (1.26.4) that nothing updated, so it had kept
+# shipping a binary below the 1.26.6 stdlib floor the rest of the fleet moved
+# to. It now builds on 1.27 against a minor-granularity pin.
+deployShim:
+  enabled: true
+  image: ghcr.io/fairtier/rill-deploy-shim:0.0.3
+# kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
+seedImage: alpine/k8s:1.33.13
+# Git-backed project persistence (SNAPSHOT_BACKEND=git): restore init
+# container + save/sync sidecar. Same binary the (frozen) shared path runs
+# in S3 mode. 0.2.0 adds the AUTH_TOKEN bearer gate the published
+# rill-snapshot endpoint depends on (ingressroute-snapshot.yaml); 0.3.0 adds
+# OTel traces + metrics over OTLP/HTTP, inert without an endpoint. 0.3.1 is
+# a Go 1.27 rebuild with refreshed deps — no behaviour change.
+sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.1
+
+# Lakekeeper warehouse to ATTACH — box convention, same as DuckFlight
+# (apps/box/duckflight/values.yaml iceberg.warehouse).
+warehouse: default
+
+# Secret (keys client-id/client-secret) holding Rill's Lakekeeper catalog
+# client. Rill now rides its own dedicated `rill-iceberg` Casdoor app
+# (apps/box/casdoor/values.yaml); the platform worker grants its principal
+# (oidc~admin/rill-iceberg) writer on VM boxes (provisioning.go
+# lakekeeperPrincipals). Flipped off the shared DuckFlight identity
+# (duckflight-iceberg-secrets) 2026-07-19 once the canary box
+# showed the grant registered in Lakekeeper.
+icebergSecretsName: rill-iceberg-secrets
+
+# The customer-authored Rill project content (dashboards, models) lives in
+# an on-box Gitea repo; platform-managed files (rill.yaml, duckdb.yaml,
+# .env) are gitignored there and keep coming from the ConfigMap overlay.
+# sync = fast-forward pull only when the tree is clean; save = commit +
+# plain push (autosave + SIGTERM) — never force, never auto-merge. A
+# rejected push surfaces as status "remote_changed" on the snapshot RPC.
+git:
+  # fairtier-admin is the fixed Gitea admin the gitea seed creates
+  # (apps/box/gitea/templates/seed-job.yaml); the rill seed creates the
+  # repo under it and mints the sidecar token (Secret rill-git).
+  remoteURL: http://gitea:3000/fairtier-admin/rill.git
+  branch: main
+  syncInterval: 1m
+  # Background save. On-demand saves come from the Console Save button:
+  # The central FairTier API proxies TriggerSnapshot to the published rill-snapshot
+  # endpoint (bearer-gated, see ingressroute-snapshot.yaml + seed step 5).
+  autosaveInterval: 5m
+
+# Requests track measured usage (~58Mi / 3m steady on a box). The 1Gi limit
+# is the one that matters for Rill — DuckDB sizes its buffer manager from it
+# (see duckdb.memoryLimit below), so the limit stays put; only the idle
+# reservation shrinks. Net-neutral sizing rule:
+# apps/box/argocd/templates/helmchartconfig.yaml.
+resources:
+  requests:
+    cpu: 25m
+    memory: 96Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+# Second, read-only Rill instance (`rill start --preview`) serving the
+# production URL dashboards.customer-<slug>. Rill's mode is fixed at
+# startup and two processes can't share one project dir (embedded
+# DuckDB), so the viewer is its own StatefulSet + PVC, ff-pulling the
+# same Gitea repo. NB: this roughly doubles Rill's footprint on the box
+# (an extra 1Gi limit + its own DuckDB ingest of the same Iceberg
+# sources).
+viewer:
+  # Publish latency after a save is bounded by this pull interval — kept
+  # short so a Console Save (or autosave) lands on dashboards. within
+  # seconds. A 15s fetch against the on-box Gitea is negligible load.
+  syncInterval: 15s
+  # ~62Mi / 2m measured; same reasoning as the editor instance above.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  storage:
+    projectSize: 2Gi
+
+# git operations on a small project are cheap; shared-path sidecar parity.
+# Applies to the `snapshot` container in BOTH StatefulSets, so a change here
+# costs or frees twice. Seven days of working set: editor p95 16Mi / max 18Mi,
+# viewer p95 19Mi / max 20Mi — 24Mi covers both maxima.
+# NB the dlt chart's identical-looking sidecarResources stays at 32Mi: it is
+# shared with dlt's `snapshot`, which reaches 33Mi.
+sidecarResources:
+  requests:
+    cpu: 20m
+    memory: 24Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+duckdb:
+  # ~65% of resources.limits.memory — DuckDB otherwise sizes its buffer
+  # manager from host RAM and gets OOM-killed (shared-path derivation).
+  memoryLimit: 665MB
+
+storage:
+  # Rill project dir (customer-authored dashboards/models + Rill state)
+  # on the k3s default local-path PVC — the box is single-node, so no
+  # snapshot-to-S3 sidecar like the shared path needed. Same durability
+  # story as the postgres/gitea PVCs (Phase-5 backups).
+  projectSize: 2Gi

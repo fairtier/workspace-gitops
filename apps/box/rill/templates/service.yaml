@@ -1,0 +1,52 @@
+# ClusterIP only — never exposed directly: `rill start` has no auth, all
+# ingress traffic goes through oauth2-proxy (oauth2-proxy.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: rill
+  labels:
+    app: rill
+spec:
+  selector:
+    app: rill
+    tier: box
+  ports:
+    - name: http
+      port: 9009
+      targetPort: 9009
+---
+# Snapshot sidecar RPC (TriggerSnapshot/ListSnapshots + /debug/sync-status).
+# Internal-only; named like the shared path (rill-snapshot) so a future
+# central box agent can reuse the same routing convention.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rill-snapshot
+  labels:
+    app: rill
+spec:
+  selector:
+    app: rill
+    tier: box
+  ports:
+    - name: snapshot
+      port: 8484
+      targetPort: 8484
+---
+# Read-only --preview instance (statefulset-viewer.yaml). ClusterIP only,
+# same rule as above: all ingress traffic goes through its own
+# oauth2-proxy (oauth2-proxy-viewer.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: rill-viewer
+  labels:
+    app: rill-viewer
+spec:
+  selector:
+    app: rill-viewer
+    tier: box
+  ports:
+    - name: http
+      port: 9009
+      targetPort: 9009

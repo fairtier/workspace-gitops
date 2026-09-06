@@ -1,0 +1,44 @@
+{{- if .Values.consoleEnabled }}
+# The workspace Console served from the box itself (apps/box/console) —
+# the split's box-hosted UI. Wave 4: it
+# reads Secret console-oidc, which the workspace-api seed Job (wave 3)
+# mints, and is useless without workspace-api answering anyway.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: console
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  labels:
+    app.kubernetes.io/name: console
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/console
+    helm:
+      releaseName: console
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+{{- end }}

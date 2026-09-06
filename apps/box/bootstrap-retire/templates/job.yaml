@@ -1,0 +1,28 @@
+# Immediate path: a Sync hook, so one rollout retires the manifests on
+# every box the moment the branch is fast-forwarded, instead of waiting for
+# the next CronJob tick. Wave -1 (after the RBAC + script ConfigMap at -2).
+#
+# BeforeHookCreation delete policy so the previous run's pod is replaced and
+# its logs are the current answer to "did this box retire its manifests?".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-retire
+  namespace: kube-system
+  labels:
+    app: bootstrap-retire
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Guards that are not satisfied yet exit 0 ("waiting"), so a retry only
+  # ever covers a genuine failure (API unreachable, hostPath not mounted).
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: bootstrap-retire
+    spec:
+      restartPolicy: OnFailure
+      {{- include "box-bootstrap-retire.podSpec" . | nindent 6 }}

@@ -1,0 +1,19 @@
+# Both muxes are in-cluster addressable; only :8080 is published by the
+# Ingress. The dlt-worker's future local poll (Phase 3D) targets
+# http://workspace-api:8081 — h2c, same as it speaks to central today.
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-api
+  labels:
+    app: workspace-api
+spec:
+  selector:
+    app: workspace-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: internal
+      port: 8081
+      targetPort: 8081

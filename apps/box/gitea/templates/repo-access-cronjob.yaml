@@ -1,0 +1,126 @@
+# Converges collaborator grants for OIDC-provisioned (customer) users on the
+# fairtier-admin repos. Gitea has no first-login hook and the
+# seed Jobs run before any customer user exists, so a periodic converge is
+# the only box-local option (casdoor-audience-sync pattern; a new user gets
+# access within ~one tick of first sign-in).
+#
+# Permission matrix (per repo):
+#   rill            write  # customer-authored (BYO-Rill push-back)
+#   transformations write  # customer-authored dbt project
+#   pipelines       read   # Console-rendered, worker runtime truth — a
+#                          # direct push would be clobbered by the mirror's
+#                          # full-state converge (gaps #4), so read-only
+#   dlt             write  # machine-owned state, but its seeded README
+#                          # promises cursor edits as "supported break-glass
+#                          # surgery" — that needs write; worst case is
+#                          # recoverable from the repo's own history
+#
+# Downgrades are enforced too (PUT updates an existing collaboration), so a
+# hand-granted write on `pipelines` converges back to read within a tick.
+# Users are selected by source_id != 0 (OIDC auth source); the only local
+# user is the admin owner, and any future local bot users stay out of scope.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitea-repo-access-sync
+  labels:
+    app: gitea-repo-access-sync
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: gitea-repo-access-sync
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: sync
+              image: {{ .Values.seedImage }}
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  GITEA=http://gitea:3000
+
+                  if ! curl -sf -o /dev/null --max-time 5 "$GITEA/api/healthz"; then
+                    echo "gitea not serving — skipping this tick"
+                    exit 0
+                  fi
+
+                  MATRIX="rill:write transformations:write pipelines:read dlt:write"
+
+                  # Collect OIDC-provisioned logins (paginated). A failed
+                  # page is a clean skip — grants are idempotent and the
+                  # next tick retries (audience-sync pipefail lesson).
+                  users=""
+                  page=1
+                  while :; do
+                    resp=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                      "$GITEA/api/v1/admin/users?page=$page&limit=50") || {
+                      echo "WARNING: user list page $page failed — skipping this tick" >&2
+                      exit 0
+                    }
+                    batch=$(printf '%s' "$resp" | jq -r '.[] | select(.source_id != 0) | .login')
+                    users="$users $batch"
+                    [ "$(printf '%s' "$resp" | jq 'length')" -lt 50 ] && break
+                    page=$((page + 1))
+                  done
+
+                  if [ -z "${users// /}" ]; then
+                    echo "no OIDC users yet — nothing to converge"
+                    exit 0
+                  fi
+
+                  for entry in $MATRIX; do
+                    repo=${entry%%:*}
+                    want=${entry##*:}
+                    # Repos are seeded by other charts (rill/dlt seed Jobs);
+                    # on a fresh box this tick may run first.
+                    if ! curl -sf -o /dev/null -u "$GITEA_USER:$GITEA_PASS" \
+                      "$GITEA/api/v1/repos/$GITEA_USER/$repo"; then
+                      echo "repo $repo not seeded yet — skipping"
+                      continue
+                    fi
+                    for user in $users; do
+                      have=$(curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                        "$GITEA/api/v1/repos/$GITEA_USER/$repo/collaborators/$user/permission" \
+                        | jq -r '.permission' || echo none)
+                      if [ "$have" = "$want" ]; then
+                        continue
+                      fi
+                      curl -sf -X PUT -u "$GITEA_USER:$GITEA_PASS" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"permission\":\"$want\"}" \
+                        "$GITEA/api/v1/repos/$GITEA_USER/$repo/collaborators/$user" || {
+                        echo "WARNING: grant $want on $repo to $user failed" >&2
+                        continue
+                      }
+                      echo "granted $want on $repo to $user (was $have)"
+                    done
+                  done
+                  echo "repo access converged"
+              env:
+                - name: GITEA_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: gitea-secrets
+                      key: admin-username
+                - name: GITEA_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: gitea-secrets
+                      key: admin-password
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi

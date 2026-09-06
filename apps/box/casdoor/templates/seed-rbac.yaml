@@ -1,0 +1,64 @@
+# RBAC for the casdoor-seed Job (seed-job.yaml). Wave -2: must exist before
+# the wave -1 hook pod starts, or the very first sync deadlocks waiting on a
+# ServiceAccount that only a later wave would apply (same as gitea/seed-rbac).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: casdoor-seed
+  labels:
+    app: casdoor-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: casdoor-seed
+  labels:
+    app: casdoor-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  # `get`/`patch` are name-scoped; `create` cannot be (K8s RBAC limitation)
+  # but the Job only ever creates the secrets listed here.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - casdoor-init-data
+      - casdoor-admin-credentials
+      - casdoor-builtin-admin
+      - lakekeeper-oidc
+      - web-oidc
+      - duckflight-iceberg-secrets
+      - dlt-oidc
+      - rill-iceberg-secrets
+      - lakekeeper-audiences
+      # The federation client this box mints for itself and deposits.
+      - fairtier-central-oidc
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # Roll the casdoor pod when the seed changed init_data (Casdoor reads the
+  # file at startup only), and lakekeeper when the audience list changed
+  # (LAKEKEEPER__OPENID_AUDIENCE is read at startup only).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["casdoor", "lakekeeper"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: casdoor-seed
+  labels:
+    app: casdoor-seed
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: casdoor-seed
+subjects:
+  - kind: ServiceAccount
+    name: casdoor-seed

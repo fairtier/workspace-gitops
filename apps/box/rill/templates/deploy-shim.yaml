@@ -1,0 +1,101 @@
+# rill-deploy-shim: a tiny reverse proxy inserted between oauth2-proxy and
+# Rill. It intercepts Rill's built-in "Deploy" button (upstream's dead-end
+# Rill Cloud CTA) and routes it to the box's own publish flow.
+#
+# oauth2-proxy's --upstream points here (see oauth2-proxy.yaml) instead of
+# straight at rill:9009, so the shim sits POST-auth: it injects a client
+# script into Rill's HTML and serves POST /__ft/deploy, which triggers the
+# snapshot sidecar's TriggerSnapshot (rill-snapshot:8484, bearer-gated) —
+# commit+push /project to Gitea, which the viewer publishes. Everything else
+# is proxied verbatim to rill:9009.
+#
+# Source + rationale: github.com/fairtier/rill-deploy-shim (its own repo;
+# published to public GHCR by GitHub Actions).
+#
+# Gated on deployShim.enabled (default false): oauth2-proxy only routes
+# through the shim when this is deployed, so keep the two in lock-step. Do
+# not enable until the pinned image tag exists on GHCR.
+{{- if .Values.deployShim.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rill-deploy-shim
+  labels:
+    app: rill-deploy-shim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rill-deploy-shim
+  template:
+    metadata:
+      labels:
+        app: rill-deploy-shim
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # uid 65532 = distroless nonroot.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rill-deploy-shim
+          image: {{ .Values.deployShim.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: LISTEN_ADDR
+              value: ":9009"
+            - name: RILL_UPSTREAM
+              value: "http://rill:9009"
+            - name: SNAPSHOT_URL
+              value: "http://rill-snapshot:8484"
+            # Same bearer the snapshot sidecar gates on (seed Job step 5);
+            # the shim presents it when calling TriggerSnapshot in-cluster.
+            - name: SNAPSHOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rill-snapshot-auth
+                  key: token
+          ports:
+            - containerPort: 9009
+              name: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9009
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9009
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rill-deploy-shim
+  labels:
+    app: rill-deploy-shim
+spec:
+  selector:
+    app: rill-deploy-shim
+  ports:
+    - name: http
+      port: 9009
+      targetPort: 9009
+{{- end }}

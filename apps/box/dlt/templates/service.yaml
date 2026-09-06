@@ -1,0 +1,18 @@
+# Snapshot sidecar RPC (TriggerSnapshot/ListSnapshots + /debug/sync-status).
+# Internal-only; name symmetry with the shared path and rill-snapshot. Also
+# the StatefulSet's governing service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dlt-snapshot
+  labels:
+    app: dlt-worker
+    tier: box
+spec:
+  selector:
+    app: dlt-worker
+    tier: box
+  ports:
+    - name: snapshot
+      port: 8484
+      targetPort: snapshot

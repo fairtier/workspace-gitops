@@ -1,0 +1,28 @@
+# The fleet k3s pin. The controller compares each matching node against
+# `version` and runs rancher/k3s-upgrade (image tag = the version) on it via
+# a privileged Job: replaces the k3s binary, restarts the service. A box
+# already at the pinned version is a no-op — safe to ship ahead of a real
+# upgrade.
+#
+# Single-node semantics: cordon only (no drain — there is nowhere to evict
+# to, and the upgrade Job tolerates the unschedulable taint). The apiserver
+# blips while k3s restarts; workloads keep running (containerd is not
+# touched). ArgoCD self-heal settles anything that observed the blip.
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: k3s-server
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  version: {{ .Values.k3sVersion | quote }}
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: In
+        values:
+          - "true"
+  serviceAccountName: system-upgrade
+  cordon: true
+  upgrade:
+    image: rancher/k3s-upgrade

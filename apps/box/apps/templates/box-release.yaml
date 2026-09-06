@@ -1,0 +1,54 @@
+{{- if .Values.releaseAgentEnabled }}
+# The deploy agent (apps/box/box-release): asks the control plane which commit
+# of this tree the box should run, and patches box-root to match.
+#
+# Wave 2, for the same reason the credential sync is: it authenticates with a
+# Casdoor client-credentials token, and the client it uses (`dlt-oidc`) is
+# seeded at wave 1. Earlier, the script would find no Secret, warn, and exit 0
+# — no harm, but no answer either until the next tick.
+#
+# Nothing else on the box depends on this Application. That is deliberate and
+# it is the severance property: removing it stops deploys and breaks nothing.
+# The box keeps running the commit it is pinned to, and moving it becomes what
+# it already is for a self-hosted operator — editing two fields on box-root.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: box-release
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/name: box-release
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/box-release
+    helm:
+      releaseName: box-release
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+{{- end }}

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: box-issuers
+description: >-
+  Let's Encrypt ClusterIssuer for a dedicated-VM box (HTTP-01 via the k3s
+  built-in Traefik ingress class). The ACME account email is injected by the
+  app-of-apps as a helm parameter.
+type: application
+version: 0.1.0

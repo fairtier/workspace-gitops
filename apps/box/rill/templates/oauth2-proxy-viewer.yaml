@@ -1,0 +1,109 @@
+# OIDC gate in front of the read-only Rill viewer (statefulset-viewer.yaml)
+# at dashboards.customer-<slug>. Even in --preview mode the UI queries the
+# customer's data, so it must never be reachable unauthenticated. oauth2-proxy
+# has a single --redirect-url/--upstream per instance, so the viewer hostname
+# gets its own Deployment — but it reuses the same Casdoor `rill` client
+# (Secret rill-oidc); the seed Job registers the second callback on that app
+# (seed-job.yaml step 2).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rill-viewer-oauth2-proxy
+  labels:
+    app: rill-viewer-oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rill-viewer-oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: rill-viewer-oauth2-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # uid 2000 = the distroless image's nonroot user.
+        runAsUser: 2000
+        runAsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: oauth2-proxy
+          image: {{ .Values.oauth2ProxyImage }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - --http-address=0.0.0.0:4180
+            - --provider=oidc
+            - --provider-display-name=Casdoor
+            # On-box Casdoor over the public hostname — discovery + token
+            # endpoint hairpin through servicelb/Traefik (same path the
+            # gitea-init Job already validated on the live box).
+            - --oidc-issuer-url=https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}
+            - --redirect-url=https://dashboards.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}/oauth2/callback
+            - --scope=openid profile email
+            # Any user the box Casdoor authenticates is the customer's own
+            # org — no email-domain restriction on a single-tenant box.
+            - --email-domain=*
+            - --upstream=http://rill-viewer:9009
+            - --skip-provider-button=true
+            - --cookie-secure=true
+            - --cookie-name=_rill_view_oauth2
+            # Behind Traefik TLS termination — trust X-Forwarded-*.
+            - --reverse-proxy=true
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rill-oidc
+                  key: oidc-client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rill-oidc
+                  key: oidc-client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rill-oidc
+                  key: cookie-secret
+          ports:
+            - containerPort: 4180
+              name: http
+          resources:
+            requests:
+              cpu: 20m
+              memory: 24Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 4180
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rill-viewer-oauth2-proxy
+  labels:
+    app: rill-viewer-oauth2-proxy
+spec:
+  selector:
+    app: rill-viewer-oauth2-proxy
+  ports:
+    - name: http
+      port: 4180
+      targetPort: 4180

@@ -1,0 +1,22 @@
+# Production Let's Encrypt issuer — HTTP-01 solved through the k3s built-in
+# Traefik (port 80 must be open in the VM firewall). Mirrors the shared
+# cluster's issuer, with the Gateway API solver swapped for the Traefik
+# ingress-class solver.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  annotations:
+    # CRDs land in the same sync (first sync of the box) — skip the dry-run
+    # so the app doesn't hard-fail before cert-manager's CRDs exist.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.email | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik

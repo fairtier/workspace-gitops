@@ -1,0 +1,32 @@
+# rill.customer-<slug>.<baseDomain> via the k3s built-in Traefik, backed
+# by oauth2-proxy (never rill directly — see oauth2-proxy.yaml).
+# cert-manager's ingress-shim creates the Certificate from the annotation.
+# Covered by the wildcard *.customer-<slug> DNS record — no Terraform DNS
+# change needed. No request-timeout tuning needed for Rill's long-lived
+# SSE stream (/v1/instances/*/sse): Traefik applies no response timeout by
+# default (the shared path needed an explicit 0s on Envoy).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rill
+  labels:
+    app: rill
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "rill.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: rill-tls
+  rules:
+    - host: "rill.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rill-oauth2-proxy
+                port:
+                  number: 4180

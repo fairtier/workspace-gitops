@@ -1,0 +1,37 @@
+# app.conf mirrors the central Casdoor, adapted for on-box:
+#   - origin = the per-customer auth hostname
+#   - dataSourceName is intentionally EMPTY here — Casdoor reads config keys
+#     from environment variables first (conf.GetConfigString), and the
+#     deployment injects `dataSourceName` from the cloud-init-written
+#     casdoor-conf Secret. No DSN/password in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: casdoor-config
+  labels:
+    app: casdoor
+data:
+  app.conf: |
+    appname = casdoor
+    httpport = 8000
+    runmode = prod
+    copyrequestbody = true
+    driverName = postgres
+    dataSourceName =
+    dbName = casdoor
+    tableNamePrefix =
+    showSql = false
+    redisEndpoint =
+    defaultStorageProvider =
+    isCloudIntranet = false
+    authState = "casdoor"
+    socks5Proxy = ""
+    verificationCodeTimeout = 10
+    initScore = 0
+    logPostOnly = true
+    isUsernameLowered = false
+    origin = "https://auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+    staticBaseUrl = "https://cdn.casbin.org"
+    enableGzip = true
+    initDataNewOnly = true
+    initDataFile = "./init_data.json"

@@ -1,0 +1,38 @@
+# auth.customer-<slug>.<baseDomain> via the k3s built-in Traefik.
+# cert-manager's ingress-shim creates the Certificate from the annotation
+# (one Certificate/Ingress per exposed hostname).
+#
+# Unlike the shared path (which path-filters /api, /login, ... and keeps the
+# admin UI on a private network), the whole Casdoor surface is served here:
+# this is the customer's own IdP on the customer's own box, and they
+# administer it themselves. The bootstrap admin account Casdoor creates for
+# itself is rotated at seed (seed-job.yaml step 5) so nothing ships with a
+# default credential.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: casdoor
+  labels:
+    app: casdoor
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Bounce Gitea's id_token_hint-less logout back to Gitea instead of
+    # Casdoor's error page (see middleware-gitea-logout.yaml).
+    traefik.ingress.kubernetes.io/router.middlewares: fairtier-system-casdoor-gitea-logout-fix@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: casdoor-tls
+  rules:
+    - host: "auth.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: casdoor
+                port:
+                  number: 8000

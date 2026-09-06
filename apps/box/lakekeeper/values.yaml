@@ -1,0 +1,197 @@
+# Lakekeeper chart values for a dedicated-VM box.
+#
+# Chart: https://lakekeeper.github.io/lakekeeper-charts/ lakekeeper, pinned in
+# apps/box/apps/values.yaml (0.11.x). Values shape mirrors the frozen
+# shared-cluster Application, adapted for on-box:
+#   - externalDatabase -> on-box postgres (fairtier-system)
+#   - authz -> on-box OpenFGA
+#   - auth.oauth2.providerUri -> injected as an Application helm parameter
+#     (hostname-dependent: https://auth.customer-<slug>.<baseDomain>), and so
+#     is the discovery URL the wait-for-oidc initContainer below polls
+#   - no HTTPRoute; ingress lives in apps/box/lakekeeper/ingress/
+#
+# Secrets (fairtier-system, existingSecret pattern — nothing in git):
+#   lakekeeper-postgres:  postgres-user, postgres-password (cloud-init)
+#   lakekeeper-secrets:   encryption-key (cloud-init)
+#   lakekeeper-audiences: LAKEKEEPER__OPENID_AUDIENCE (comma-separated
+#                         client IDs of the seeded Casdoor applications —
+#                         computed ON THE BOX by the casdoor-seed Job)
+#
+# R2/S3 storage is NOT configured here: warehouses (incl. R2 credentials)
+# are created by the FairTier API's worker over the public Lakekeeper URL,
+# exactly as on the shared path.
+
+image:
+  tag: v0.12.3 # mirrors the shared-path pin
+
+postgresql:
+  enabled: false # Use the on-box postgres StatefulSet
+
+dbMigrations:
+  enabled: true # Migration job for the external database
+
+externalDatabase:
+  type: postgres
+  host_read: postgresql.fairtier-system.svc.cluster.local
+  host_write: postgresql.fairtier-system.svc.cluster.local
+  port: 5432
+  database: lakekeeper
+  userSecret: lakekeeper-postgres
+  userSecretKey: postgres-user
+  passwordSecret: lakekeeper-postgres
+  passwordSecretKey: postgres-password
+
+secretBackend:
+  type: postgres
+  postgres:
+    encryptionKeySecret: lakekeeper-secrets
+    encryptionKeySecretKey: encryption-key
+
+authz:
+  backend: openfga
+  openfga:
+    endpoint: http://openfga-grpc.fairtier-system.svc.cluster.local:8081
+    # Single-tenant box: one fixed store (shared path uses a per-customer
+    # store created by Terraform; here Lakekeeper's migrate creates it).
+    store: lakekeeper
+
+auth:
+  # Kept from the shared path for in-cluster bootstrap tooling; the worker
+  # bootstraps this instance over the public URL with OIDC.
+  k8s:
+    enabled: true
+    audience: https://kubernetes.default.svc
+  oauth2:
+    # Injected via Application helm parameter (hostname-dependent).
+    providerUri: ""
+
+catalog:
+  # Under `catalog`, NOT top-level: this chart nests the catalog Deployment's
+  # settings here (the pod carries app.kubernetes.io/component=catalog), and a
+  # top-level `resources:` is silently ignored — no error, no warning, the
+  # container just renders with none. It sat top-level from the first commit,
+  # so lakekeeper ran BestEffort on every box while this file claimed 256Mi.
+  # That is the worst kind of drift: the file documents an intent the cluster
+  # never had. Verified against the live pod, not just moved.
+  #
+  # Sized off measured usage (~28Mi steady) with room for compaction bursts.
+  # The request is what matters here: it buys Burstable instead of BestEffort,
+  # which is the difference between "killed first" and "killed after the
+  # things that actually caused the pressure".
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  # Restricted-PSA-compliant contexts, same as the shared path.
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  extraEnvFrom:
+    - secretRef:
+        name: lakekeeper-audiences
+
+  # Do not start Lakekeeper until Casdoor is serving a discovery document it
+  # can actually parse.
+  #
+  # Lakekeeper fetches <providerUri>/.well-known/openid-configuration once, at
+  # startup, and treats an unparseable answer as FATAL:
+  #
+  #   Error: Failed to parse openid configuration.
+  #          Expected fields: ["jwks_uri", "issuer"]
+  #     1: expected ident at line 1 column 2
+  #
+  # ("column 2" is HTML — Casdoor mid-restart, or Traefik's error page in front
+  # of it.) It exits 1, so the whole warehouse is then down for as long as
+  # CrashLoopBackOff lasts, which on 2026-08-27 was 18 restarts over ~45
+  # minutes after a memory-pressure livelock restarted Casdoor. Both of that
+  # night's iceberg-maintenance attempts died against it, the second one after
+  # streaming 1.4 GiB of a rewrite it could then not commit.
+  #
+  # The catalog being only as available as its identity provider is the real
+  # bug; this makes the recovery *flat* instead of exponential. A blocking init
+  # container is not a retry — a pod that waits is never in backoff, so the
+  # catalog comes back when Casdoor does rather than at whatever point in the
+  # backoff curve it happens to land. Same shape as the wait-for-catalog gate
+  # in apps/box/iceberg-maintenance, and for the same reason: a blip measured
+  # in seconds should delay a start, not cost 45 minutes.
+  #
+  # It parses the document rather than checking the status code, because the
+  # recorded failure IS a 200-shaped body Lakekeeper could not read. `jq -e`
+  # asks exactly what Lakekeeper asks: is this JSON, and does it carry issuer
+  # and jwks_uri.
+  #
+  # alpine/k8s (curl + jq) rather than the Lakekeeper image, which is a bare
+  # Rust binary: it is already pulled on every box for the casdoor/gitea/rill/
+  # dlt/workspace-api seed Jobs, so this adds no image to a degraded box.
+  extraInitContainers:
+    - name: wait-for-oidc
+      image: alpine/k8s:1.33.13
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          # jq's exit status is the pipeline's, so a curl that fails feeds it
+          # nothing and this is false — one test for "reachable" and
+          # "parseable" together, which is the pair Lakekeeper needs.
+          parseable() {
+            curl -fsS --max-time 10 "$OIDC_DISCOVERY_URL" |
+              jq -e 'has("issuer") and has("jwks_uri")' >/dev/null 2>&1
+          }
+
+          deadline=$(($(date +%s) + WAIT_TIMEOUT_SECONDS))
+          until parseable; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "timed out waiting for a parseable OIDC discovery document at $OIDC_DISCOVERY_URL" >&2
+              # Failing here restarts the pod, which waits again — the same
+              # flat curve, just with a log line saying it has been this long.
+              exit 1
+            fi
+            echo "waiting for $OIDC_DISCOVERY_URL to serve a parseable OIDC discovery document..."
+            sleep 5
+          done
+          echo "OIDC discovery document is parseable"
+      env:
+        # Value injected by apps/box/apps/templates/lakekeeper.yaml, which is
+        # where every hostname-dependent parameter lives. It targets
+        # catalog.extraInitContainers[0].env[0].value BY INDEX: keep
+        # wait-for-oidc first in this list and OIDC_DISCOVERY_URL first in its
+        # env, or the parameter lands on the wrong container.
+        - name: OIDC_DISCOVERY_URL
+          value: ""
+        # 10 minutes, then restart and wait again — matching the box's other
+        # start gate. Long enough to cover a Casdoor restart and a box
+        # recovering from memory pressure; bounded so a *permanent*
+        # misconfiguration (a wrong hostname, a dead DNS record) still shows up
+        # as a failing pod rather than one that waits forever in Init.
+        - name: WAIT_TIMEOUT_SECONDS
+          value: "600"
+      # Pod-level runAsNonRoot needs a numeric uid here: this image's USER is
+      # root, and extraInitContainers do not inherit containerSecurityContext
+      # above (the chart renders them verbatim).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      # A sleep loop with one socket open. It must not reserve anything the
+      # catalog then has to compete for.
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+service:
+  type: ClusterIP
+  port: 8080 # mirrors the shared path values (catalog serves on 8181)

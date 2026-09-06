@@ -1,0 +1,22 @@
+# gRPC (FlightSQL) via Traefik: TLS terminates at Traefik (websecure), the
+# backend speaks plaintext HTTP/2 — hence scheme h2c, which plain Ingress
+# cannot express. Backend service `duckflight` port 31337 mirrors the shared
+# cluster's GRPCRoute.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: duckflight
+  labels:
+    app.kubernetes.io/name: duckflight
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`duckflight.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}`)
+      kind: Rule
+      services:
+        - name: duckflight
+          port: 31337
+          scheme: h2c
+  tls:
+    secretName: duckflight-tls

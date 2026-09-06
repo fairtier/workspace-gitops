@@ -1,0 +1,45 @@
+# k3s day-2 upgrades (Phase-5 fleet-ops floor): Rancher
+# system-upgrade-controller (vendored upstream manifests, see
+# apps/box/system-upgrade/Chart.yaml) + a server Plan pinning the fleet to
+# `k3sVersion` (apps/values.yaml). Bumping the pin rolls k3s across the
+# fleet through the normal GitOps rollout. Wave 3 with the other
+# non-data-path apps; the Plan is a no-op until the pin moves past the
+# box's installed version.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: system-upgrade
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app.kubernetes.io/name: system-upgrade
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/system-upgrade
+    helm:
+      releaseName: system-upgrade
+      parameters:
+        - name: k3sVersion
+          value: "{{ .Values.k3sVersion }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: system-upgrade
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

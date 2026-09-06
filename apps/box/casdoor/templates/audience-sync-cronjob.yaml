@@ -1,0 +1,121 @@
+# Converges Secret lakekeeper-audiences to the FULL set of the org's Casdoor
+# application client IDs — including Console-created service accounts
+# (lakekeeper_user.go AddUser targets the box Casdoor on VM substrate), which
+# the static casdoor-seed list can't know about. Ownership split:
+#   - casdoor-seed (step 4): union-merges its static app IDs in, never removes;
+#   - this CronJob: writes the API-derived truth, so deleted service accounts
+#     drop out within one tick.
+# Lakekeeper reads LAKEKEEPER__OPENID_AUDIENCE at startup only, so the pod is
+# rolled when the list changes — a new service account becomes usable within
+# ~one tick (Console copy says "active within a few minutes").
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: casdoor-audience-sync
+  labels:
+    app: casdoor-audience-sync
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: casdoor-audience-sync
+        spec:
+          restartPolicy: Never
+          # Reuses the casdoor-seed Role: web-oidc + lakekeeper-audiences
+          # secrets, lakekeeper deployment restart.
+          serviceAccountName: casdoor-seed
+          containers:
+            - name: sync
+              image: {{ .Values.seedImage }}
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  CAS=http://casdoor:8000
+                  # Casdoor org name is the bare slug (seed-template-configmap
+                  # creates the org + apps with organization={{ .Values.slug }};
+                  # the "customer-" prefix belongs to the DOMAIN, not the org).
+                  # A wrong "customer-<slug>" here queries a nonexistent org,
+                  # returns an empty app list every tick, and the guard below
+                  # then (correctly) refuses to sync — audiences silently stop
+                  # updating (canary box, 2026-07-20).
+                  ORG="{{ .Values.slug }}"
+
+                  if ! curl -sf -o /dev/null --max-time 5 "$CAS/api/health"; then
+                    echo "casdoor not serving — skipping this tick"
+                    exit 0
+                  fi
+
+                  # App-credential basic auth grants org admin-API access —
+                  # the same mechanism the rill seed uses with the web pair.
+                  API_ID=$(kubectl get secret web-oidc -o jsonpath='{.data.client-id}' | base64 -d)
+                  API_SECRET=$(kubectl get secret web-oidc -o jsonpath='{.data.client-secret}' | base64 -d)
+
+                  # Capture the HTTP call SEPARATELY so a failed or
+                  # empty-rendering response is a clean skip, not a silent
+                  # `pipefail` death. The old one-liner piped through
+                  # `grep -v '^$'`, which exits 1 on empty input — with
+                  # `set -euo pipefail` that killed the script BEFORE the
+                  # empty-guard below could run, so a single bad response
+                  # wedged the sync indefinitely (2026-07-19 box-wide
+                  # ingestion outage: Casdoor answered mid-restart, the
+                  # sync then failed every tick and never re-converged).
+                  resp=$(curl -sf -u "$API_ID:$API_SECRET" \
+                    "$CAS/api/get-organization-applications?owner=admin&organization=$ORG") || {
+                    echo "WARNING: Casdoor application query failed — not touching audiences" >&2
+                    exit 0
+                  }
+                  ids=$(printf '%s' "$resp" | jq -r '.data[]?.clientId // empty' | sort -u | paste -sd, -)
+
+                  # An empty list means the API call went wrong (the org
+                  # always has the seeded apps) — never wipe the audiences.
+                  if [ -z "$ids" ]; then
+                    echo "WARNING: empty application list from Casdoor — not touching audiences" >&2
+                    exit 0
+                  fi
+
+                  # Never let a PARTIAL list narrow the audiences. The org
+                  # always carries at least the statically seeded apps
+                  # ({{ len .Values.initDataApplications }}); a shorter
+                  # result means Casdoor answered mid-restart or wrongly
+                  # (during the 2026-07-19 outage it returned 3 of
+                  # {{ len .Values.initDataApplications }}, dropping
+                  # dlt-worker and rolling Lakekeeper to a broken audience
+                  # set). Skip and keep the last-good secret; the casdoor
+                  # seed Job union-merges the static IDs back on next sync
+                  # as a backstop. Console service-account removals still
+                  # take effect (count stays >= the seeded floor).
+                  count=$(printf '%s\n' "$ids" | tr ',' '\n' | grep -c . || true)
+                  if [ "$count" -lt {{ len .Values.initDataApplications }} ]; then
+                    echo "WARNING: only $count application(s) from Casdoor (< {{ len .Values.initDataApplications }} seeded) — partial list, not touching audiences" >&2
+                    exit 0
+                  fi
+
+                  current=$(kubectl get secret lakekeeper-audiences \
+                    -o jsonpath='{.data.LAKEKEEPER__OPENID_AUDIENCE}' 2>/dev/null | base64 -d || true)
+                  if [ "$current" = "$ids" ]; then
+                    echo "audiences unchanged"
+                    exit 0
+                  fi
+                  kubectl create secret generic lakekeeper-audiences \
+                    --from-literal=LAKEKEEPER__OPENID_AUDIENCE="$ids" \
+                    --dry-run=client -o yaml | kubectl apply -f -
+                  if kubectl get deployment lakekeeper >/dev/null 2>&1; then
+                    kubectl rollout restart deployment lakekeeper
+                  fi
+                  echo "audiences updated: $ids"
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi

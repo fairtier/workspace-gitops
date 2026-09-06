@@ -1,0 +1,47 @@
+# Per-box dlt-worker — the ingestion layer on the dedicated-VM substrate.
+# Wave 2: needs Casdoor (1) for the dlt-oidc client; ordering vs. gitea and
+# lakekeeper (both 2) is handled by the seed Job's wait loop and the
+# worker's own retries — wait loops, not wave bumps (../README.md).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dlt
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app.kubernetes.io/name: dlt
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/dlt
+    helm:
+      releaseName: dlt
+      parameters:
+        - name: slug
+          value: "{{ .Values.slug }}"
+        - name: baseDomain
+          value: "{{ .Values.baseDomain }}"
+        # Whether this box's worker polls itself or central (Phase 3C).
+        - name: workspacePlaneLocal
+          value: "{{ .Values.workspacePlaneLocal }}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

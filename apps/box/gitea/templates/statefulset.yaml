@@ -1,0 +1,89 @@
+# Single-replica Gitea (rootless image), configured entirely via
+# GITEA__section__KEY env — the image's entrypoint merges env into
+# /etc/gitea/app.ini (environment-to-ini) on every boot. HTTPS-only for the
+# MVP: SSH is disabled, git access goes over the Ingress with tokens.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gitea
+  labels:
+    app: gitea
+    tier: box
+spec:
+  serviceName: gitea
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+      tier: box
+  template:
+    metadata:
+      labels:
+        app: gitea
+        tier: box
+    spec:
+      securityContext:
+        # Rootless image runs as git (1000); fsGroup makes the PVCs writable.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        # The gitea database itself is created by the postgres
+        # ensure-databases Job (apps/box/postgres/ensure-databases-job.yaml).
+        - name: wait-for-postgres
+          image: {{ .Values.initImage }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h postgresql.fairtier-system.svc.cluster.local -U postgres; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+      containers:
+        - name: gitea
+          image: {{ .Values.image }}
+          env:
+            {{- include "gitea.env" . | nindent 12 }}
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/gitea
+            - name: config
+              mountPath: /etc/gitea
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # No storageClassName: k3s default (local-path) — the box's own disk,
+        # same durability story as the postgres PVC (Phase-5 backups).
+        resources:
+          requests:
+            storage: {{ .Values.storage.dataSize }}
+    - metadata:
+        name: config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.storage.configSize }}

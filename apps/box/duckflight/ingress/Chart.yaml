@@ -1,0 +1,8 @@
+apiVersion: v2
+name: box-duckflight-ingress
+description: >-
+  Traefik IngressRoute (gRPC/h2c) + cert-manager Certificate for the on-box
+  DuckFlight FlightSQL server (duckflight.customer-<slug>.<baseDomain>).
+  Replaces the shared path's Gateway API GRPCRoute.
+type: application
+version: 0.1.0

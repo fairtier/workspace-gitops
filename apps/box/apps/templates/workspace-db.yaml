@@ -1,0 +1,35 @@
+# Box-local `workspace` database schema (run history — the state-inversion
+# half of the control-plane/workspace-plane split, Phase 2C). The
+# database itself is created by the postgres ensure-databases Job; this app
+# owns its schema via a migrate Job that re-runs (idempotently) on sync.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: workspace-db
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app.kubernetes.io/name: workspace-db
+    fairtier.com/customer: "{{ .Values.slug }}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "{{ .Values.repoURL }}"
+    targetRevision: "{{ .Values.targetRevision }}"
+    path: apps/box/workspace-db
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: "{{ .Values.stackNamespace }}"
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

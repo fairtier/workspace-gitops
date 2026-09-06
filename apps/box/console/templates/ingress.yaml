@@ -1,0 +1,31 @@
+# console.customer-<slug>.<baseDomain> via the k3s built-in Traefik.
+# Covered by the wildcard *.customer-<slug> DNS record, which is deliberately
+# grey-clouded — Cloudflare's Universal SSL does not cover this label depth —
+# so no Terraform DNS change is needed. The matching redirect
+# URI was registered on the box Casdoor `console` app by the workspace-api
+# seed Job when this was still Phase 3D groundwork.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: console
+  labels:
+    app: console
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "console.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      secretName: console-tls
+  rules:
+    - host: "console.customer-{{ .Values.slug }}.{{ .Values.baseDomain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: console
+                port:
+                  number: 3000

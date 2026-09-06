@@ -1,0 +1,27 @@
+# slug + baseDomain are injected by the app-of-apps; placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+image: alpine/k8s:1.33.13
+
+# How often to ask. A deploy is "move the channel, then wait" — this interval
+# is the wait, and it is the same 15 minutes as the credential channel because
+# both are a box reconciling a central answer and neither is urgent enough to
+# poll harder. The Sync hook covers the first run so a fresh box does not wait
+# a full interval to learn its pin.
+schedule: "*/17 * * * *"
+
+# The Casdoor client this box authenticates to the control plane with. Reused
+# from the dlt-worker rather than minting another: the tenant is bound from
+# the token's ISSUER host, not from the application name, so which app signs
+# it is not a security boundary — and seeding a new one has its own hazards.
+oidcSecret: dlt-oidc
+
+# The Application this agent may write, and the only one. Named here rather
+# than assumed, because the RBAC is generated from it: a Role scoped to
+# resourceNames: [box-root] in the argocd namespace, with `get` and `patch`
+# and nothing else. The agent cannot create an Application, cannot delete one,
+# and cannot touch any other.
+rootApp:
+  name: box-root
+  namespace: argocd

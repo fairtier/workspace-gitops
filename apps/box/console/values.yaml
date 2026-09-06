@@ -1,0 +1,120 @@
+# slug + baseDomain are injected by the app-of-apps
+# (apps/box/apps/templates/console.yaml); placeholders here.
+slug: ""
+baseDomain: "fairtier.com"
+
+# Public GHCR on purpose: boxes have no pull secret. No :latest.
+#
+# 0.1.0 is the first release of the split workspace Console: the box's own
+# Casdoor as the app's ONLY login (PKCE, and the box JWT is the only token in
+# the bundle), one transport to workspace-api,
+# and a Bun server that refuses to boot with any FT_* missing rather than
+# serve a half-configured SPA.
+#
+# 0.2.0 fills connectionDetails from the sibling-service endpoints the
+# bootstrap document carries since workspace-api 0.18.0 (lakekeeper_url,
+# lakekeeper_warehouse, rill_url, cube_url, duckflight_url) — the catalog
+# connection card, connect snippets and app launch links light up. Against
+# an older API the fields are absent and the views keep degrading, so the
+# two bumps need no ordering.
+#
+# 0.3.0 is the box half of the console virtual join, Phase A: crossing to
+# "Account & Billing" stops
+# opening a tab, the user menu gains a language + theme picker (every view here
+# was already translated — there was just nowhere to choose), and theme/locale
+# travel in an `ft_prefs` cookie so a preference picked in either console holds
+# in the other. Central's half shipped first and has been writing that cookie
+# with nothing to read it; this is the reader.
+#
+# 0.4.0 is the box half of Phase B, the union menu: the sidebar and command
+# palette here now also list the account Console's Settings and Account
+# screens, as same-tab links into `accountUrl` below, so both consoles show one
+# menu. The paths it links to are a contract (src/layouts/navContract.ts in
+# each repo, guarded by a unit test on both sides) — renaming a route in either
+# app means keeping the old path alive as a redirect. Self-hosted, with no
+# accountUrl, nothing foreign renders and the app is whole on its own.
+#
+# The cookie's `Domain` is derived from accountUrl below, never from a
+# constant — no accountUrl (self-host) means no attribute and an ordinary
+# same-origin cookie. That matters here because a parent-domain cookie is
+# readable AND writable by every box under `.fairtier.com`, so the box treats
+# it as untrusted input in both directions: display preferences only, size
+# ceiling, per-field whitelists. Nothing else may ever ride in it.
+#
+# 0.5.0 is the AI-diagnosis pass (needs workspace-api >= 0.23.0 or the new
+# buttons degrade to "coming soon" toasts): Ask AI in the SQL editor (draft
+# lands in the editor, never runs) and Explain buttons on failed pipeline
+# runs, failed dbt runs, and SQL errors — one shared ExplainPanel.
+#
+# 0.9.0 replaces every native <select> in the app with ui/Select.vue. A
+# <select> only lets CSS style its closed box — the open list is drawn by the
+# browser, so the pipeline wizard's source picker dropped a square,
+# white-bordered OS popup into the middle of a dark themed form (most visibly
+# on Firefox). The replacement is a teleported listbox painted from the design
+# tokens, with the keyboard and ARIA the native control gave us for free. One
+# behaviour change rides along: a value matching no option now shows the
+# placeholder instead of the first option.
+#
+# 0.9.1 fixes the one placement case 0.9.0 got wrong: a panel that flips above
+# its trigger (no room below) was positioned by its top edge as if it were
+# always the full 288px tall, so a two-option list floated detached above the
+# control. It is pinned by its bottom edge now.
+#
+# 0.10.0 registers the `duckdb` source type (label + badge + generic JSON
+# editor). May trail the backend: an older console still renders unknown
+# types through the sourceFor() fallback.
+# 0.10.1 drops the live-SQL promises from the Google-connection copy
+# (query-time federation retired).
+#
+# 0.11.0 lets a Drive pipeline be paid for by signing in: a `duckdb` source
+# whose config names the gdrive extension shows the Google connection picker
+# instead of a JSON box, the consent asks for drive.file only there, and the
+# picker names an account that has no Drive access (Connection.scopes).
+# Placeholders also come from the source registry now, so each type shows its
+# own shape rather than one hardcoded rest_api example. **Needs workspace-api
+# >= 0.33.0**: the capability parameter and Connection.scopes are its.
+#
+# 0.11.1 fixes the Google setup copy, which still described a Sheets-only
+# product: the Integrations steps now name both prerequisites a Drive source
+# needs in the customer's own Google Cloud project — enable the Drive API,
+# list drive.file on the consent screen — and the trust note says a Drive
+# source reaches the files a pipeline is pointed at, never the whole Drive.
+#
+# 0.12.0 makes the source picker a list of systems instead of engines:
+# PostgreSQL beside MySQL and SQL Server, PDF / web page / file at a URL,
+# Google Sheets beside a Drive file — six of them `source_type: duckdb` with
+# the extension preset, over three guided forms (database ATTACH fields with a
+# table list; address + "Read as" + table name; the same by Drive file id).
+# Credentials are declared per source, so a database asks for a password and a
+# public PDF is shown no credentials card at all. **Reads workspace-api
+# >= 0.34.0**'s duckdb_extensions to know which tiles this box would accept;
+# without it every tile is offered, as before.
+#
+# 0.13.0 fixes a Select that could not be opened at all once its list was
+# long enough to scroll: the panel scrolls itself to the selected option as it
+# opens, and the capture-phase scroll listener that closes it on a page scroll
+# heard that and shut it inside the same click. Which made the source picker
+# 0.12.0 had just grown to twelve options the one control in the app nobody
+# could use — by mouse or by keyboard. Also: a Drive file is chosen through
+# Google's own Picker rather than by pasting an id out of a URL, a Drive PDF
+# is offered as the two extensions it needs, and a connection can be tested
+# before it is saved. That last card hides itself unless the box advertises
+# `capabilities.testable_source_types`, which workspace-api 0.34.0 does not —
+# so it stays invisible here until workspace-api is bumped, exactly as
+# intended.
+image: "ghcr.io/fairtier/console:0.13.0"
+
+# Where the "Account & Billing" link points — the hosting provider's
+# management console. Empty hides the link (the self-host default); on a
+# FairTier-managed box it is the central Console.
+accountUrl: "https://console.fairtier.com"
+
+# A static-file server: tiny, and bounded by design (no queries, no state).
+# Real requests so it is Burstable, not BestEffort — BestEffort is how
+# ArgoCD and Traefik became the kernel's first OOM victims.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 128Mi

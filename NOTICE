@@ -1,0 +1,12 @@
+FairTier workspace-gitops
+Copyright 2026 FairTier
+
+This repository contains deployment manifests and Helm charts. The software
+they deploy is not distributed here: upstream components (cert-manager,
+Traefik, Argo CD, Casdoor, OpenFGA, Lakekeeper, Rill, Grafana Alloy,
+rancher/system-upgrade-controller and others) are referenced by chart version
+or image tag and remain under their own licenses, and FairTier's own components
+are published from their own repositories under github.com/fairtier.
+
+Some manifests vendor upstream YAML verbatim where a chart does not exist;
+those files carry their origin and license in a header comment.

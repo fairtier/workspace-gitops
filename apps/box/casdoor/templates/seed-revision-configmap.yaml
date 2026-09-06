@@ -1,0 +1,27 @@
+# The whole point of this ConfigMap is to be diffable. Nothing reads it.
+#
+# ArgoCD does not diff hook resources. A change confined to seed-job.yaml
+# (a Sync hook) therefore leaves every tracked resource byte-identical: no
+# drift, no sync operation, and the hook never re-runs. The Application still
+# reports "Synced" against the new revision while the box keeps executing the
+# old script — which is exactly how the 2026-08-10 deposit fix stalled, looking
+# healthy the entire time.
+#
+# Holding a hash of the rendered seed Job here means editing the seed always
+# drifts a tracked resource, so ArgoCD syncs — and re-runs the hook — on its
+# own. Delete this and box seed changes silently stop rolling again.
+#
+# Same lesson as the ensure-databases hook: mutable content must never live
+# only inside a hook.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: casdoor-seed-revision
+  labels:
+    app: casdoor-seed
+  annotations:
+    # Before the wave -1 hook, so the drift that triggers the sync is already
+    # applied when the seed it describes runs.
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  seedSha: {{ include (print $.Template.BasePath "/seed-job.yaml") . | sha256sum | quote }}

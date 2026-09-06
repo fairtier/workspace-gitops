@@ -1,0 +1,9 @@
+apiVersion: v2
+name: box-apps
+description: >-
+  App-of-apps for a FairTier dedicated-VM box. Templates one ArgoCD
+  Application per stack component; per-customer values (slug, baseDomain,
+  acmeEmail) are injected by cloud-init via the root Application's helm
+  parameters. See apps/box/README.md.
+type: application
+version: 0.1.0

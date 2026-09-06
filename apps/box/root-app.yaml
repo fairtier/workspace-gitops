@@ -1,0 +1,62 @@
+# Root app-of-apps for a dedicated-VM box — CANONICAL COPY.
+#
+# This file is NOT synced by ArgoCD itself (it lives one level above the
+# chart the root app points at). The authoritative instance is written by
+# cloud-init into /var/lib/rancher/k3s/server/manifests/ on the box, after
+# the ArgoCD HelmChart CR and the repo Secret. cloud-init templates:
+#
+#   - spec.source.repoURL          (this repository's HTTPS URL — public, so
+#     no credential is involved)
+#   - spec.source.targetRevision   (an IMMUTABLE COMMIT — never a branch and
+#     never a tag. Nothing in this repository moves a box; deploying is a
+#     write to THIS field, by the box's operator or by the agent acting for
+#     them. See README.md "Fleet rollout")
+#   - helm parameters: repoURL, targetRevision (must mirror the two above,
+#     they are re-used by the child Applications for their git sources),
+#     slug, baseDomain, acmeEmail (per-customer values)
+#
+# See README.md in this directory.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: box-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    # <-- templated by cloud-init
+    repoURL: https://github.com/fairtier/workspace-gitops.git
+    # <-- templated by cloud-init (a commit SHA; day-2 moves are a patch of
+    # this field and the mirroring helm parameter below, never a push here)
+    targetRevision: REPLACED_AT_PROVISION_TIME
+    path: apps/box/apps
+    helm:
+      parameters:
+        # Must mirror spec.source.repoURL / targetRevision — the child
+        # Applications reference the same repo for their git sources.
+        - name: repoURL
+          value: https://github.com/fairtier/workspace-gitops.git
+        - name: targetRevision
+          value: REPLACED_AT_PROVISION_TIME
+        # Per-customer values <-- templated by cloud-init
+        - name: slug
+          value: CUSTOMER_SLUG
+        - name: baseDomain
+          value: fairtier.com
+        - name: acmeEmail
+          value: ACME_EMAIL
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
