@@ -102,7 +102,15 @@ baseDomain: "fairtier.com"
 # `capabilities.testable_source_types`, which workspace-api 0.34.0 does not —
 # so it stays invisible here until workspace-api is bumped, exactly as
 # intended.
-image: "ghcr.io/fairtier/console:0.13.0"
+#
+# 0.14.0 stops a refused AI draft from looking like a draft. workspace-api
+# 0.36.0 lets the dbt and Rill drafters answer "we can't build that here" —
+# the data was never ingested, or the workspace has no such capability — and
+# a refusal now leaves the transformation form and the file editor exactly as
+# they were, with the reason standing beside the prompt instead of arriving as
+# a toast. Against an older workspace-api the field is simply never set, so
+# the drafters behave as they always did.
+image: "ghcr.io/fairtier/console:0.14.0"
 
 # Where the "Account & Billing" link points — the hosting provider's
 # management console. Empty hides the link (the self-host default); on a
