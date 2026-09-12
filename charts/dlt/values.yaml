@@ -125,7 +125,17 @@ baseDomain: "fairtier.com"
 # scheduled run hours later. Pairs with workspace-api 0.35.0 (it queues them
 # and serves `capabilities.testable_source_types`) and console 0.13.0 (it
 # shows the card); the worker may lead, never trail.
-image: ghcr.io/fairtier/dlt-worker:0.15.0
+#
+# 0.16.0 makes a retry re-read that pipeline's definition and, when it carries
+# no .age file, re-poll its credentials — after the backoff, because the
+# backoff is the window a fix actually arrives in. A save made moments before a
+# run (a corrected dataset name, a reconnected Google OAuth credential) used to
+# lose the race: the retry repeated the run-start snapshot, so all three
+# attempts failed against a problem already fixed on disk. Every failure path
+# still keeps the snapshot, so the worst case is the old behaviour. No
+# workspace-api pairing — this reads the pipelines checkout the worker already
+# syncs on its own cadence.
+image: ghcr.io/fairtier/dlt-worker:0.16.0
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
