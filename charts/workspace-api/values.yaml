@@ -247,7 +247,13 @@ baseDomain: "fairtier.com"
 # is dialed as plaintext h2c, which is what duckflight:31337 speaks behind
 # the IngressRoute that terminates TLS for it. grpc:// stays TLS, since that
 # is the shape the frozen shared substrate has stored.
-image: ghcr.io/fairtier/workspace-api:0.37.0
+#
+# 0.37.1 is dependencies only — pgx 5.11.0, keyfunc 3.8.2, casdoor-go-sdk
+# 1.54.0 — plus CI action pins moved to commit SHAs. No behaviour change and
+# no migration, so 0.37.0 is a clean rollback in both directions. arrow-go
+# stays at 18.7.0: 18.8.0 pulls avro 1.8.0, which iceberg-go v0.6.0 does not
+# compile against (see the go.mod note in workspace-api).
+image: ghcr.io/fairtier/workspace-api:0.37.1
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 
