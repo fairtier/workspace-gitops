@@ -340,10 +340,11 @@ demoPublicBaseURL: "https://demo-data.fairtier.com"
 enforceConsoleAudience: true
 
 # AI drafting through the FairTier assist relay (0.22.0): the deployment
-# template sets the FAIRTIER_ASSIST_* env (relay URL + the dlt-oidc client
-# pair) so this box drafts with centrally held LLM keys. False is the
-# rollback lever — drafting returns to UNIMPLEMENTED ("coming soon"),
-# nothing else changes.
+# template sets FAIRTIER_ASSIST_URL so this box drafts with centrally held
+# LLM keys, authenticated with the shared FAIRTIER_RELAY_* identity (the
+# dlt-oidc client pair, set unconditionally). False is the rollback
+# lever — drafting returns to UNIMPLEMENTED ("coming soon"), nothing else
+# changes.
 assistRelay: true
 
 # Pipeline failure EMAILS through the FairTier alert relay (0.37.0): a failed
