@@ -142,7 +142,9 @@ baseDomain: "fairtier.com"
 #     browser, which is why they get their own overrides rather than reusing
 #     LakekeeperURL/DuckFlightURL — those two are published in
 #     /.well-known/fairtier-workspace, so pointing either in-cluster would fix
-#     the dial and hand the customer an unreachable address. The exposure was
+#     the dial and hand the customer an unreachable address. (0.36.0 splits
+#     those two as well, so that is no longer the trade — see below.) The
+#     exposure was
 #     boot ordering, not steady state: the adopt and hydration sweeps run at
 #     process start, and https://git.<domain> additionally waits on its
 #     Let's Encrypt certificate. Same reasoning as AUTH_JWKS_URL above.
@@ -230,7 +232,22 @@ baseDomain: "fairtier.com"
 # Migration 000005 adds `source_tests`. Also accepts a plural `extensions` in
 # a duckdb source config (a Drive PDF is two). Roll it with console 0.13.0 and
 # dlt-worker 0.15.0.
-image: ghcr.io/fairtier/workspace-api:0.35.0
+#
+# 0.36.0 splits the catalog and query-engine URLs into the one this box
+# ADVERTISES and the one it DIALS. Until now they were a single field each,
+# so WORKSPACE_LAKEKEEPER_URL / _DUCKFLIGHT_URL existed but could not be set
+# to anything useful — an in-cluster value fixed the dial and handed the
+# customer's browser an address it cannot resolve. The advertised variables
+# keep their meaning and their public defaults; the new
+# lakekeeperDialURL / duckflightDialURL below are dial-only, in the same
+# class as giteaURL / rillSnapshotURL. Clearing both is the rollback and
+# restores the pre-0.36.0 behaviour exactly.
+#
+# The DuckFlight dial also made the client scheme-aware: an http:// endpoint
+# is dialed as plaintext h2c, which is what duckflight:31337 speaks behind
+# the IngressRoute that terminates TLS for it. grpc:// stays TLS, since that
+# is the shape the frozen shared substrate has stored.
+image: ghcr.io/fairtier/workspace-api:0.36.0
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 
@@ -266,6 +283,22 @@ warehouse: default
 # rill-less box never dials this address.
 giteaURL: "http://gitea:3000"
 rillSnapshotURL: "http://rill-snapshot:8484"
+
+# The same idea for the two services that DO have a public face
+# (workspace-api 0.36.0). Unlike the pair above, each of these has an
+# advertised twin that must stay public: WORKSPACE_LAKEKEEPER_URL and
+# WORKSPACE_DUCKFLIGHT_URL are published in /.well-known/fairtier-workspace
+# and pasted into the customer's own DuckDB or Spark, so they keep their
+# https://<service>.<customerDomain> defaults. Only the dial moves in here.
+#
+# duckflight:31337 is plaintext h2c — Traefik terminates TLS at the edge and
+# speaks h2c to this very backend, so dialing the Service skips the edge, not
+# the protocol. The client reads the http:// scheme and drops TLS for it.
+#
+# Empty falls back to the advertised URL, which is what every box did before
+# this tag and what central still does — so clearing either is the rollback.
+lakekeeperDialURL: "http://lakekeeper:8181"
+duckflightDialURL: "http://duckflight:31337"
 
 # Hydration lever (0.4.0+), same shape: the binary defaults it ON, so this
 # only exists as the rollback — false renders `off` and the box then serves

@@ -76,18 +76,21 @@ spec:
               value: "http://casdoor:8000/.well-known/jwks"
             - name: WORKSPACE_LAKEKEEPER_WAREHOUSE
               value: {{ .Values.warehouse | quote }}
-            # Lakekeeper/DuckFlight URLs are left at their defaults
-            # (https://<service>.<customerDomain>): they are handed to
-            # customers as connection strings, so they must be the public
-            # ones — same values central serves today.
+            # WORKSPACE_LAKEKEEPER_URL / _DUCKFLIGHT_URL are left at their
+            # defaults (https://<service>.<customerDomain>). Those are the
+            # ADVERTISED addresses: published in
+            # /.well-known/fairtier-workspace and handed to customers as
+            # connection strings, so they must stay the public ones — the same
+            # values central serves today.
             #
-            # These two are the opposite case and that is the whole reason
-            # they exist as separate variables: nothing publishes them, this
-            # process is the only thing that dials them, and both are its own
-            # services one hop away. Going out to the public hostname made the
-            # adopt and hydration sweeps — which run at process START — depend
-            # on the node hairpin and on git.<domain>'s Let's Encrypt
-            # certificate being issued. Same split as AUTH_JWKS_URL above.
+            # Everything below is the opposite case, and that is the whole
+            # reason each is a separate variable: nothing publishes them, this
+            # process is the only thing that dials them, and every one is its
+            # own service a single hop away. Going out to the public hostname
+            # made the adopt and hydration sweeps — which run at process
+            # START — depend on the node hairpin and on <service>.<domain>'s
+            # Let's Encrypt certificate being issued. Same split as
+            # AUTH_JWKS_URL above.
             {{- if .Values.giteaURL }}
             - name: WORKSPACE_GITEA_URL
               value: {{ .Values.giteaURL | quote }}
@@ -95,6 +98,23 @@ spec:
             {{- if .Values.rillSnapshotURL }}
             - name: WORKSPACE_RILL_SNAPSHOT_URL
               value: {{ .Values.rillSnapshotURL | quote }}
+            {{- end }}
+            # The dial halves of the two advertised URLs above (workspace-api
+            # 0.36.0). Before that tag these had no dial half at all, so an
+            # in-cluster value was unusable: it fixed this process and broke
+            # the customer's browser. Unset falls back to the advertised URL,
+            # which is the rollback and the pre-0.36.0 behaviour.
+            #
+            # The duckflight one is http:// on purpose — :31337 is plaintext
+            # h2c, the same backend the IngressRoute terminates TLS in front
+            # of, and the client reads the scheme to decide.
+            {{- if .Values.lakekeeperDialURL }}
+            - name: WORKSPACE_LAKEKEEPER_DIAL_URL
+              value: {{ .Values.lakekeeperDialURL | quote }}
+            {{- end }}
+            {{- if .Values.duckflightDialURL }}
+            - name: WORKSPACE_DUCKFLIGHT_DIAL_URL
+              value: {{ .Values.duckflightDialURL | quote }}
             {{- end }}
 
             # --- Console sign-in (Phase 3C) -----------------------------
