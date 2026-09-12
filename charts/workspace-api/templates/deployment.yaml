@@ -161,35 +161,46 @@ spec:
                   name: workspace-api-oauth-state
                   key: state-secret
 
-            {{- if .Values.assistRelay }}
-            # --- AI drafting via the FairTier assist relay (0.22.0) ------
-            # No LLM provider key on the box, ever: the box prepares the draft
-            # prompt and relays the completion to central
-            # (assistrelay.v1 at worker-api.<baseDomain>), authenticated with
-            # a client-credentials token from its OWN Casdoor — the same
-            # channel and the same dlt-oidc client the box-secrets sync uses.
-            # In-cluster token URL, public issuer stamped into the token —
-            # same split and same hairpin rationale as AUTH_JWKS_URL above.
-            # A self-hoster instead sets their own provider key
-            # (DEEPSEEK_/ANTHROPIC_/LLM_*), which always wins over these.
+            # --- FairTier relay identity ----------------------------------
+            # Every FairTier API relay (assist drafting, failure alerts)
+            # authenticates with a client-credentials token from this box's
+            # OWN Casdoor — the same channel and the same dlt-oidc client the
+            # box-secrets sync uses. In-cluster token URL, public issuer
+            # stamped into the token — same split and same hairpin rationale
+            # as AUTH_JWKS_URL above. Set unconditionally: it names no relay,
+            # each relay's URL below is what turns that relay on.
             # secretKeyRef optional: before casdoor-seed has minted dlt-oidc
-            # the env is incomplete and drafting simply stays UNIMPLEMENTED.
-            - name: FAIRTIER_ASSIST_URL
-              value: "https://worker-api.{{ .Values.baseDomain }}"
-            - name: FAIRTIER_ASSIST_TOKEN_URL
+            # the env is incomplete and every relay simply stays off.
+            - name: FAIRTIER_RELAY_TOKEN_URL
               value: "http://casdoor:8000/api/login/oauth/access_token"
-            - name: FAIRTIER_ASSIST_OIDC_CLIENT_ID
+            - name: FAIRTIER_RELAY_OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: dlt-oidc
                   key: client-id
                   optional: true
-            - name: FAIRTIER_ASSIST_OIDC_CLIENT_SECRET
+            - name: FAIRTIER_RELAY_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: dlt-oidc
                   key: client-secret
                   optional: true
+            {{- if .Values.assistRelay }}
+            # --- AI drafting via the FairTier assist relay (0.22.0) ------
+            # No LLM provider key on the box, ever: the box prepares the draft
+            # prompt and relays the completion to central (assistrelay.v1 at
+            # worker-api.<baseDomain>). A self-hoster instead sets their own
+            # provider key (DEEPSEEK_/ANTHROPIC_/LLM_*), which always wins.
+            - name: FAIRTIER_ASSIST_URL
+              value: "https://worker-api.{{ .Values.baseDomain }}"
+            {{- end }}
+            {{- if .Values.alertRelay }}
+            # --- Pipeline failure emails via the FairTier alert relay (0.37.0)
+            # The box reports a failed run (alertrelay.v1 at the same host);
+            # central resolves the owner and sends. Unset, the in-app
+            # notification is the only signal.
+            - name: FAIRTIER_ALERT_RELAY_URL
+              value: "https://worker-api.{{ .Values.baseDomain }}"
             {{- end }}
 
             # --- Box Postgres ------------------------------------------

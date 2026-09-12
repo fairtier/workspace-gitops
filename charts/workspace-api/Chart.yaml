@@ -10,4 +10,4 @@ description: >-
   workspace transport is (Phase 3C).
 type: application
 version: 0.1.0
-appVersion: "0.33.1" # tracks values.yaml `image`
+appVersion: "0.37.0" # tracks values.yaml `image`

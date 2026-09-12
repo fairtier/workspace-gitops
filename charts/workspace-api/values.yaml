@@ -247,7 +247,7 @@ baseDomain: "fairtier.com"
 # is dialed as plaintext h2c, which is what duckflight:31337 speaks behind
 # the IngressRoute that terminates TLS for it. grpc:// stays TLS, since that
 # is the shape the frozen shared substrate has stored.
-image: ghcr.io/fairtier/workspace-api:0.36.0
+image: ghcr.io/fairtier/workspace-api:0.37.0
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 
@@ -345,6 +345,14 @@ enforceConsoleAudience: true
 # rollback lever — drafting returns to UNIMPLEMENTED ("coming soon"),
 # nothing else changes.
 assistRelay: true
+
+# Pipeline failure EMAILS through the FairTier alert relay (0.37.0): a failed
+# run's in-app notification is raised here, but the owner's address, their
+# preference and the sender identity live centrally, so the box pushes the
+# event over the same dlt-oidc identity the assist relay uses and central
+# sends the email. False is the rollback lever — the bell keeps working,
+# nothing else changes.
+alertRelay: true
 
 # At-rest encryption of this box's stored credentials. The key is generated on
 # the box and never leaves it, so a rotation here is the box's own business:
