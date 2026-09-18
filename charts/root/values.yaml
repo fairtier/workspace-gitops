@@ -23,9 +23,9 @@ targetRevision: ""
 # --- Fleet-wide version pins ------------------------------------------------
 # Sources for the pins are recorded in ARCHITECTURE.md.
 certManagerChartVersion: "v1.20.2"   # same pin as the central cluster
-lakekeeperChartVersion: "0.11.x"     # same pin as the frozen shared path
+lakekeeperChartVersion: "0.11.0"     # exact, not the 0.11.x range it was — charts/lakekeeper/values.yaml says why
 duckflightChartVersion: "0.0.7"      # duckflight tag helm/v0.0.7 — extensions.image now means EXTRAS (union over the baked set; unset = no initContainer); 0.0.6 added reconcileSql mount + tempDir (box-only; shared path is ❄️ frozen at 0.0.4)
-alloyChartVersion: "1.10.0"          # same pin as the central Alloy
+alloyChartVersion: "1.12.1"          # app v1.19.2; pinned here only — see charts/observability/values.yaml
 # Better Stack eBPF collector. Pinned but NOT deployed — see the gate below.
 betterstackCollectorChartVersion: "v0.1.44"
 # The box's OWN ArgoCD (charts/argocd HelmChart CR). Bootstrap installs the

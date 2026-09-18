@@ -1,7 +1,11 @@
 # Lakekeeper chart values for a dedicated-VM box.
 #
 # Chart: https://lakekeeper.github.io/lakekeeper-charts/ lakekeeper, pinned in
-# charts/root/values.yaml (0.11.x). Values shape mirrors the frozen
+# charts/root/values.yaml (0.11.0 — an exact version since this commit; it was
+# the range `0.11.x`, which ArgoCD re-resolves on every sync, so an upstream
+# patch could reach the catalog holding every customer's table metadata with
+# no commit here at all. That is the one thing this tree exists to prevent).
+# Values shape mirrors the frozen
 # shared-cluster Application, adapted for on-box:
 #   - externalDatabase -> on-box postgres (fairtier-system)
 #   - authz -> on-box OpenFGA
@@ -22,7 +26,7 @@
 # exactly as on the shared path.
 
 image:
-  tag: v0.12.3 # mirrors the shared-path pin
+  tag: v0.12.4 # patch on the 0.12 line; chart 0.11.0's own appVersion is 0.12.2
 
 postgresql:
   enabled: false # Use the on-box postgres StatefulSet

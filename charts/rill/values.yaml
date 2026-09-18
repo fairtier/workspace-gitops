@@ -11,7 +11,7 @@ copyImage: busybox:1.38
 # OIDC gate in front of Rill (`rill start` has no auth of its own; the
 # shared path used an Envoy SecurityPolicy — Traefik OSS has no OIDC
 # filter, so the box fronts Rill with oauth2-proxy instead).
-oauth2ProxyImage: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+oauth2ProxyImage: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
 # Deploy-button interceptor proxy. Sits between oauth2-proxy and rill:9009;
 # when enabled, oauth2-proxy's --upstream points at it (else straight at
 # rill:9009). Source + build live in their own GitHub repo

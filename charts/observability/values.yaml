@@ -1,5 +1,10 @@
 # Values for the UPSTREAM grafana/alloy chart (pinned via alloyChartVersion in
-# charts/root/values.yaml — same 1.10.0 as the central cluster). Static by
+# charts/root/values.yaml — 1.12.1, app v1.19.2). This used to claim parity
+# with the central cluster's Alloy; there is no such pin anywhere in the
+# platform tree to be equal to, so the claim is dropped rather than carried
+# forward untrue. Parity was never a requirement anyway: the box pushes over
+# remote_write and the Loki push API, both stable across these versions.
+# Static by
 # design ($values files cannot be templated): everything per-box (slug,
 # baseDomain) lives in the rendered River config, which the config/ mini chart
 # ships as ConfigMap `alloy-config`.

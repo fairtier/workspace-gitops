@@ -43,7 +43,7 @@ spec:
                   key: postgres-password
       containers:
         - name: migrate
-          image: migrate/migrate:v4.18.1
+          image: migrate/migrate:v4.20.1
           args:
             - -path
             - /migrations

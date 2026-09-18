@@ -4,8 +4,26 @@ slug: ""
 baseDomain: "fairtier.com"
 
 # Rootless image from Gitea's own registry (no Docker Hub rate limits).
-# 1.26.4 — first 1.26.x without the repo-code-page regression. No :latest.
-image: docker.gitea.com/gitea:1.26.4-rootless
+# 1.27.3 — the third patch on 1.27, chosen over 1.27.0 for the same reason
+# 1.26.4 was chosen over 1.26.0: a .0 here has a history of shipping UI
+# regressions. No :latest.
+#
+# **This bump is one-way on a box.** Gitea runs its own schema migrations at
+# startup and does not support downgrading across a minor, so a pin move past
+# this commit is not reversible by moving the pin back — the honest lever is
+# restore-from-backup (the nightly job tars the Gitea PVCs and dumps its
+# database, so the material exists). Treat it like a workspace-api migration:
+# say so in the `release set` note.
+#
+# 1.27.0's two breaking changes do not reach this box. Reusable-workflow
+# handling is Gitea Actions, which nothing here enables, and the
+# Content-Security-Policy script nonce affects Gitea's own web UI, which is
+# not the surface customers use — repos are platform-managed and edited
+# through the Console. The OAuth2/Casdoor login path this box DOES depend on
+# (ALLOW_ONLY_EXTERNAL_REGISTRATION, auto-registration, ACCOUNT_LINKING) is
+# untouched, but it is config verified by a browser round-trip on the box, so
+# re-run that check on the canary before this reaches stable.
+image: docker.gitea.com/gitea:1.27.3-rootless
 initImage: postgres:17-alpine
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4

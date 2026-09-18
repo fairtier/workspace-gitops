@@ -1,7 +1,7 @@
 # Observability — box Alloy → central ingest
 
 The fleet-ops observability floor of the dedicated-VM substrate:
-Grafana **Alloy** (upstream chart `grafana/alloy` **1.10.0** — pinned in
+Grafana **Alloy** (upstream chart `grafana/alloy` **1.12.1** — pinned in
 [../root/values.yaml](../root/values.yaml) `alloyChartVersion`, the same
 version the central cluster runs)
 shipping **outbound-only** to `https://ingest.<baseDomain>`

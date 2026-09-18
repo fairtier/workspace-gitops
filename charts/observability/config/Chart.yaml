@@ -12,4 +12,4 @@ description: >-
   mini chart.
 type: application
 version: 0.4.0
-appVersion: "1.10.0" # grafana/alloy chart pin (charts/root/values.yaml)
+appVersion: "1.12.1" # grafana/alloy chart pin (charts/root/values.yaml)

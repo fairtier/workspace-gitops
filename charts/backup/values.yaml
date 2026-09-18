@@ -7,7 +7,7 @@ baseDomain: "fairtier.com"
 # talks to the postgresql Service), so the nightly run pulls nothing new.
 pgImage: postgres:17-alpine
 # Official rclone image from ghcr (no Docker Hub rate limits). No :latest.
-rcloneImage: ghcr.io/rclone/rclone:1.74.4
+rcloneImage: ghcr.io/rclone/rclone:1.75.1
 
 # Nightly at 03:30 UTC — after iceberg-maintenance (02:30), before EU
 # business hours.
