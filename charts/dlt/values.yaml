@@ -155,7 +155,7 @@ baseDomain: "fairtier.com"
 # 413), and the builder-stage uv moves 0.10.10 -> 0.12.15.
 image: ghcr.io/fairtier/dlt-worker:0.17.0
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
 # + save/sync sidecar. Same binary the (frozen) shared path runs in S3 mode.
 # 0.2.0 adds an optional AUTH_TOKEN bearer gate (left unset here — this

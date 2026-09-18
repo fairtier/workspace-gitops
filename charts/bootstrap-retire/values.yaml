@@ -1,6 +1,6 @@
 # kubectl + bash. The same seed image every other box Job uses, so it is
 # already in the node's image store — this app pulls nothing new.
-image: alpine/k8s:1.33.13
+image: alpine/k8s:1.36.4
 
 # k3s auto-deploy directory. Contains k3s's OWN packaged components
 # (traefik, coredns, local-storage, metrics-server) as well as the three

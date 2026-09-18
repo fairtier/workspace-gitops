@@ -4,7 +4,7 @@
 slug: ""
 baseDomain: "fairtier.com"
 
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 
 # How often to re-fetch. This is the reason the chart ships a CronJob and not
 # only a Sync hook: an ArgoCD hook runs when a sync runs, and a sync runs when

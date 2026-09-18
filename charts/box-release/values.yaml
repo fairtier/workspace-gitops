@@ -2,7 +2,7 @@
 slug: ""
 baseDomain: "fairtier.com"
 
-image: alpine/k8s:1.33.13
+image: alpine/k8s:1.36.4
 
 # How often to ask. A deploy is "move the channel, then wait" — this interval
 # is the wait, and it is the same 15 minutes as the credential channel because

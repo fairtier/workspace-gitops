@@ -37,7 +37,7 @@ deployShim:
   enabled: true
   image: ghcr.io/fairtier/rill-deploy-shim:0.0.3
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 # Git-backed project persistence (SNAPSHOT_BACKEND=git): restore init
 # container + save/sync sidecar. Same binary the (frozen) shared path runs
 # in S3 mode. 0.2.0 adds the AUTH_TOKEN bearer gate the published

@@ -8,7 +8,7 @@ baseDomain: "fairtier.com"
 image: docker.gitea.com/gitea:1.26.4-rootless
 initImage: postgres:17-alpine
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 
 resources:
   requests:

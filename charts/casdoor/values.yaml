@@ -7,7 +7,7 @@ baseDomain: "fairtier.com"
 image: casbin/casdoor:3.153.0
 initImage: postgres:17-alpine
 # kubectl + curl + jq + bash for the seed Job (same pin as gitea/values.yaml).
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 
 # Request tracks measured usage (~27Mi / 3m steady), with headroom for login
 # bursts — kept above openfga's because this is the interactive sign-in path

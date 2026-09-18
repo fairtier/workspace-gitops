@@ -259,7 +259,7 @@ baseDomain: "fairtier.com"
 # note in workspace-api).
 image: ghcr.io/fairtier/workspace-api:0.37.2
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
-seedImage: alpine/k8s:1.33.13
+seedImage: alpine/k8s:1.36.4
 
 # Box Postgres (same StatefulSet as gitea/casdoor/etc.). MVP uses the
 # superuser from the postgres-credentials Secret; a dedicated role is the

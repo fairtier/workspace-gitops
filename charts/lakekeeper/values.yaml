@@ -133,7 +133,7 @@ catalog:
   # dlt/workspace-api seed Jobs, so this adds no image to a degraded box.
   extraInitContainers:
     - name: wait-for-oidc
-      image: alpine/k8s:1.33.13
+      image: alpine/k8s:1.36.4
       command: ["/bin/sh", "-c"]
       args:
         - |

@@ -36,6 +36,16 @@ argocdChartVersion: "9.5.21"         # matches the bootstrap pin
 # upgrades k3s on every box day-2 — cloud-init's install version
 # (var.k3s_version in the tenants roots) only matters at first boot; the
 # Plan converges any box past it. Keep both moving together.
+#
+# A THIRD thing moves with them, and it is not in this file: the
+# `alpine/k8s:<kubectl version>` image that every seed Job, box-secrets,
+# bootstrap-retire and box-release run kubectl from (nine pins across the
+# component values files). kubectl supports one minor of skew either side of
+# the API server; this pin is the API server. They had drifted three minors
+# apart — kubectl 1.33 against a 1.36 control plane — which held only because
+# the verbs those Jobs use are old and stable. box-release is the one that
+# makes it matter: it is the sole day-2 write path, so a kubectl that cannot
+# patch box-root is a box nobody can deploy to.
 k3sVersion: "v1.36.2+k3s1"
 
 # --- Per-box arming ----------------------------------------------------------
