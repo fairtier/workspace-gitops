@@ -3,9 +3,22 @@
 slug: ""
 baseDomain: "fairtier.com"
 
-# Same tag as the (frozen) shared path — the DuckDB/iceberg conn_init_sql
-# in configmap.yaml was hand-validated against this image there. No :latest.
-image: rilldata/rill:v0.87.2
+# v0.87.8 — the last patch on the 0.87 line. The line matters more than the
+# patch: the DuckDB/iceberg conn_init_sql in configmap.yaml was hand-validated
+# against v0.87.2 on the (frozen) shared path, and what that validation really
+# pins is the bundled DuckDB/iceberg-extension build, which does not move
+# across a patch. 0.89 does move it, and is a different decision.
+#
+# The one check that is tag-specific and is NOT re-run by any edit here: Rill
+# ATTACHes the box warehouse on VENDED Lakekeeper credentials, omitting the
+# static S3 secret and ACCESS_DELEGATION_MODE 'none' that the shared path
+# used. Confirm `SELECT * FROM lk.<ns>.<tbl>` still returns rows from the Rill
+# UI on the canary. If it ever cannot vend, the fallback is unchanged: re-add
+# the S3 secret to conn_init_sql with ACCESS_DELEGATION_MODE 'none', sourcing
+# the cloud-init R2 credentials already in fairtier-system.
+#
+# No :latest.
+image: rilldata/rill:v0.87.8
 # Copies the ConfigMap project files onto the PVC (shared-path pattern).
 copyImage: busybox:1.38
 # OIDC gate in front of Rill (`rill start` has no auth of its own; the
