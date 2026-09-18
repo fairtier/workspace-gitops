@@ -13,4 +13,4 @@ description: >-
   boxes too (day-2 rule in ARCHITECTURE.md).
 type: application
 version: 0.3.0
-appVersion: "0.9.0" # tracks values.yaml `image`
+appVersion: "0.16.0" # tracks values.yaml `image`
