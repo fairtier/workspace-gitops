@@ -1,5 +1,5 @@
 # Helm values for the jetstack cert-manager chart on a dedicated-VM box.
-# Chart version is pinned in charts/root/values.yaml (v1.20.2, the same
+# Chart version is pinned in charts/root/values.yaml (v1.20.4, the same
 # pin the central cluster runs). Resource sizing copied from there too.
 #
 # Note: config.enableGatewayAPI is intentionally NOT set — the box uses

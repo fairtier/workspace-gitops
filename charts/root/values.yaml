@@ -22,7 +22,7 @@ targetRevision: ""
 
 # --- Fleet-wide version pins ------------------------------------------------
 # Sources for the pins are recorded in ARCHITECTURE.md.
-certManagerChartVersion: "v1.20.2"   # same pin as the central cluster
+certManagerChartVersion: "v1.20.4"   # same pin as the central cluster (infra/platform/gateway.tf)
 lakekeeperChartVersion: "0.11.0"     # exact, not the 0.11.x range it was — charts/lakekeeper/values.yaml says why
 duckflightChartVersion: "0.0.7"      # duckflight tag helm/v0.0.7 — extensions.image now means EXTRAS (union over the baked set; unset = no initContainer); 0.0.6 added reconcileSql mount + tempDir (box-only; shared path is ❄️ frozen at 0.0.4)
 alloyChartVersion: "1.12.1"          # app v1.19.2; pinned here only — see charts/observability/values.yaml
@@ -31,7 +31,7 @@ betterstackCollectorChartVersion: "v0.1.44"
 # The box's OWN ArgoCD (charts/argocd HelmChart CR). Bootstrap installs the
 # version cloud-init pins — keep the two in sync; bumping THIS pin is what
 # upgrades already-provisioned boxes day-2.
-argocdChartVersion: "9.5.21"         # matches the bootstrap pin
+argocdChartVersion: "9.5.22"         # matches the bootstrap pin (platform infra/versions.json)
 # Fleet k3s version (charts/system-upgrade Plan). Bumping this pin
 # upgrades k3s on every box day-2 — cloud-init's install version
 # (var.k3s_version in the tenants roots) only matters at first boot; the
@@ -46,7 +46,7 @@ argocdChartVersion: "9.5.21"         # matches the bootstrap pin
 # the verbs those Jobs use are old and stable. box-release is the one that
 # makes it matter: it is the sole day-2 write path, so a kubectl that cannot
 # patch box-root is a box nobody can deploy to.
-k3sVersion: "v1.36.2+k3s1"
+k3sVersion: "v1.36.4+k3s1"
 
 # --- Per-box arming ----------------------------------------------------------
 # How many orphaned Iceberg files this box may DELETE per table per run.

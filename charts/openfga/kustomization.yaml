@@ -1,6 +1,15 @@
 # Per-box OpenFGA — mirrors the central OpenFGA (image openfga/openfga
-# v1.17.1, migrate job + deployment + http/grpc services), sized down to a
+# v1.20.0, migrate job + deployment + http/grpc services), sized down to a
 # single replica for a one-customer box. Cluster-internal only.
+#
+# The migrate Job and the Deployment MUST carry the same tag — they are the
+# same schema version, and the central guide says so about its own pair.
+# v1.18.0's operational warning does not apply here: the lengthy lock is on
+# the MySQL collation migration, and both planes are on Postgres. The two
+# CVEs it fixes are MySQL-backend too, so this is a currency bump, not a
+# security one. v1.19.0 IS behaviourally breaking, and in the direction you
+# want: an authorization model with a known defect now fails a cache-miss
+# resolve with ErrInvalidModel instead of silently resolving degraded.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
