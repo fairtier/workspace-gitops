@@ -135,7 +135,25 @@ baseDomain: "fairtier.com"
 # still keeps the snapshot, so the worst case is the old behaviour. No
 # workspace-api pairing — this reads the pipelines checkout the worker already
 # syncs on its own cadence.
-image: ghcr.io/fairtier/dlt-worker:0.16.0
+#
+# 0.17.0 is a minor for the runtime under the worker, not for anything the
+# worker does: the image moves python:3.12-slim -> 3.14-slim and the refreshed
+# lockfile carries **pandas 2 -> 3** with it. The two are coupled — pyroaring
+# 1.0.3 ships no cp314 wheel and cannot compile in a -slim image, so the
+# interpreter could only move once the lockfile brought pyroaring 1.1.0.
+#
+# **This is the bump on this page that wants canary time.** The upstream
+# release verified the image by hand (it builds, and offline it runs Python
+# 3.14.7, duckdb 1.5.5, pandas 3.0.5, pyroaring 1.1.0 with all six baked
+# DuckDB extensions loading), but nothing in it exercised a real CSV
+# file-drop end to end, which is the path pandas 3 sits in. Give a canary box
+# a real ingest before this reaches stable. 0.16.0 is a clean rollback — no
+# state format changes.
+#
+# Also in it: ruff's default rule set is spelled out in pyproject.toml rather
+# than inherited (ruff 0.16 widened its implicit defaults from 59 rules to
+# 413), and the builder-stage uv moves 0.10.10 -> 0.12.15.
+image: ghcr.io/fairtier/dlt-worker:0.17.0
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
@@ -143,8 +161,10 @@ seedImage: alpine/k8s:1.33.13
 # 0.2.0 adds an optional AUTH_TOKEN bearer gate (left unset here — this
 # sidecar is pod-internal, unlike Rill's published one), 0.3.0 adds OTel
 # traces + metrics over OTLP/HTTP, inert without an endpoint. 0.3.1 is a
-# Go 1.27 rebuild with refreshed deps — no behaviour change.
-sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.1
+# Go 1.27 rebuild with refreshed deps and 0.3.2 an aws-sdk-go-v2 patch roll
+# (config 1.33.5, s3 1.113.1, credentials 1.20.5, sts 1.51.0) — no behaviour
+# change in either, and none of it is even reached in git mode.
+sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.2
 
 # Lakekeeper warehouse dlt writes to — box convention, same as DuckFlight and
 # Rill (charts/duckflight/values.yaml iceberg.warehouse).

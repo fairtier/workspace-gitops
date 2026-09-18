@@ -8,7 +8,7 @@ baseDomain: "fairtier.com"
 # github.com/fairtier/iceberg-maintenance and published to ghcr.io/fairtier
 # (boxes have no pull secret, so it MUST be public). This replaced the old
 # per-run `pip install pyiceberg[pyarrow]` — the single biggest CPU/IO spike
-# of the nightly job on a small box. pyiceberg is pinned (==0.11.1) inside the image, not here.
+# of the nightly job on a small box. pyiceberg is pinned (==0.12.0) inside the image, not here.
 #
 # 0.2.0 is the fix for the 2026-07-31 OOM: 0.1.0 read the scan through
 # PyIceberg's `to_arrow_batch_reader()`, which despite the name submits every
@@ -48,7 +48,27 @@ baseDomain: "fairtier.com"
 # be alerted on: whether it is armed at all, what the run deleted, and how many
 # tables the sweep REFUSED — a refused table reports zero orphans, so without
 # that last one the backlog metric falls when the sweep stops working.
-image: ghcr.io/fairtier/iceberg-maintenance:0.9.0
+#
+# 0.10.0 takes pyiceberg 0.11.1 -> 0.12.0 and, with it, stops a normal lost
+# race from paging. 0.12.0 re-offers a failed commit inside
+# `commit_transaction` (`commit.retry.num-retries`, default 4) before it ever
+# reaches our `commit_swap`. That inner retry cannot clobber a concurrent
+# writer — it refreshes and re-validates before each re-offer, and our delete
+# predicate is ALWAYS_TRUE at serializable isolation, so a data file added
+# meanwhile is a conflict and the attempt ends rather than rebasing — but it
+# ends as `ValidationException`, which is not a `CommitFailedException`, so a
+# plain lost race was being reported `failed` instead of `conflict`.
+# Contention on a box that ingests while it compacts is normal and must not
+# look like a fault; both are `_LOST_RACE` now.
+#
+# The image also moves python:3.12-slim -> 3.13-slim (3.14 was proposed and
+# refused: pyiceberg publishes cp310-cp313 wheels only, so cp314 falls back
+# to compiling the Cython avro decoder in a compiler-free -slim image — a
+# break that would have surfaced at tag time, not in CI).
+#
+# Rollback to 0.9.0 is clean: nothing here changes what is written, only how
+# a failed commit is retried and classified.
+image: ghcr.io/fairtier/iceberg-maintenance:0.10.0
 
 # Lakekeeper warehouse to compact — box convention, same as dlt/DuckFlight/
 # Rill (charts/dlt/values.yaml warehouse).

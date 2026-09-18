@@ -248,12 +248,16 @@ baseDomain: "fairtier.com"
 # the IngressRoute that terminates TLS for it. grpc:// stays TLS, since that
 # is the shape the frozen shared substrate has stored.
 #
-# 0.37.1 is dependencies only — pgx 5.11.0, keyfunc 3.8.2, casdoor-go-sdk
-# 1.54.0 — plus CI action pins moved to commit SHAs. No behaviour change and
-# no migration, so 0.37.0 is a clean rollback in both directions. arrow-go
-# stays at 18.7.0: 18.8.0 pulls avro 1.8.0, which iceberg-go v0.6.0 does not
-# compile against (see the go.mod note in workspace-api).
-image: ghcr.io/fairtier/workspace-api:0.37.1
+# 0.37.1 and 0.37.2 are both dependencies only — pgx 5.11.0, keyfunc 3.8.2
+# and casdoor-go-sdk 1.54.0 in the first, connect-go, anthropic-sdk-go and
+# golang-migrate in the second, with CI action pins moved to commit SHAs and
+# golangci-lint 2.13.2 across the pair. No behaviour change and no migration
+# in either, so anything back to 0.37.0 is a clean rollback in BOTH
+# directions — which most bumps here are not, and which is the only reason
+# this one needs no canary soak. arrow-go stays at 18.7.0: 18.8.0 pulls avro
+# 1.8.0, which iceberg-go v0.6.0 does not compile against (see the go.mod
+# note in workspace-api).
+image: ghcr.io/fairtier/workspace-api:0.37.2
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.33.13
 

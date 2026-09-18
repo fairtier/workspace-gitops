@@ -22,4 +22,4 @@ description: >-
   credentials directly.
 type: application
 version: 0.13.0
-appVersion: "0.9.0" # ghcr.io/fairtier/iceberg-maintenance image (pins pyiceberg 0.11.1)
+appVersion: "0.10.0" # ghcr.io/fairtier/iceberg-maintenance image (pins pyiceberg 0.12.0)

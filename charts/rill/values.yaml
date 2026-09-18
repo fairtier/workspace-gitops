@@ -44,7 +44,7 @@ seedImage: alpine/k8s:1.33.13
 # rill-snapshot endpoint depends on (ingressroute-snapshot.yaml); 0.3.0 adds
 # OTel traces + metrics over OTLP/HTTP, inert without an endpoint. 0.3.1 is
 # a Go 1.27 rebuild with refreshed deps — no behaviour change.
-sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.1
+sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.2
 
 # Lakekeeper warehouse to ATTACH — box convention, same as DuckFlight
 # (charts/duckflight/values.yaml iceberg.warehouse).

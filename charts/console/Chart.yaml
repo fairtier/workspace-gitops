@@ -9,4 +9,4 @@ description: >-
   per-box arrives at runtime via /config.json from FT_* env.
 type: application
 version: 0.1.0
-appVersion: "0.14.0" # tracks values.yaml `image`
+appVersion: "0.14.2" # tracks values.yaml `image`

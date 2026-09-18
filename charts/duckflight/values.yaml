@@ -47,7 +47,12 @@ image:
   # 0.2.1 moves the embedded engine from DuckDB 1.5.0 to 1.5.5 (duckdb-go
   # v2.10505.0) on a Go 1.27 rebuild. Nothing of ours changed, but the engine
   # did — which is why extensions.image below moves in the same commit.
-  tag: "0.2.1"
+  #
+  # 0.2.2 is Go dependency bumps and CI action repins only — the engine does
+  # NOT move, so it needs no matching extensions release and 0.2.1 is a clean
+  # rollback. The chart stays at 0.0.7, which is still the newest published
+  # tag on ghcr.io/fairtier/charts/duckflight.
+  tag: "0.2.2"
 
 # No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
 # into the server image itself, and since chart 0.0.7 an unset extensions.image

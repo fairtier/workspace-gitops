@@ -110,7 +110,17 @@ baseDomain: "fairtier.com"
 # they were, with the reason standing beside the prompt instead of arriving as
 # a toast. Against an older workspace-api the field is simply never set, so
 # the drafters behave as they always did.
-image: "ghcr.io/fairtier/console:0.14.0"
+#
+# 0.14.1 and 0.14.2 change no product behaviour. 0.14.1 follows workspace-api
+# to v0.37.1 for the generated stubs — a regeneration against a wire that did
+# not move, so it neither needs nor implies the API bump beside it — and takes
+# the dependabot backlog (vue 3.5.42, vue-router 5.3.1, vue-i18n 11.4.10,
+# @bufbuild/protobuf 2.15.0, @sentry/vue 10.74.0, codemirror state+view).
+# 0.14.2 is typescript 5.9.3 -> 6.0.3, a MAJOR of the type checker: it changes
+# what `bun run type-check` accepts, not what the browser runs, and the image
+# it produced is the one that passed it. Nothing in the built output is
+# version-dependent, so 0.14.0 is a clean rollback.
+image: "ghcr.io/fairtier/console:0.14.2"
 
 # Where the "Account & Billing" link points — the hosting provider's
 # management console. Empty hides the link (the self-host default); on a
