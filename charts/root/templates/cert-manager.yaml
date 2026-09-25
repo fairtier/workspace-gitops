@@ -45,8 +45,8 @@ spec:
       # cert-manager CRDs blow the last-applied-configuration annotation limit
       - ServerSideApply=true
     retry:
-      limit: 5
+      limit: -1
       backoff:
         duration: 5s
         factor: 2
-        maxDuration: 3m
+        maxDuration: 5m

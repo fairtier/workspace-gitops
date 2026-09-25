@@ -182,7 +182,13 @@ injection path; nothing reads config from the cluster at render time.
 | `bootstrap-retire` (3)    | [bootstrap-retire/](./charts/bootstrap-retire/) (mini chart, `alpine/k8s` Sync-hook Job + daily CronJob) — writes a k3s `.skip` sentinel beside each cloud-init manifest whose GitOps twin exists, retiring the second writer that k3s's every-start re-apply creates ([cloud-init drift](#cloud-init-drift)); the only workload in the tree with a read-write hostPath                                                                                                                                                              | `kube-system`     |
 | `console` (4)             | [console/](./charts/console/) (mini chart, image `ghcr.io/fairtier/console:0.14.2` — the public [workspace Console](https://github.com/fairtier/console), split out of the hosted Console) — the browser UI over `workspace-api`, served at `console.customer-<slug>.<baseDomain>`: a Bun static server + `/config.json` from `FT_*` env (all per-box values at runtime, the image ships neutral), PKCE against the box Casdoor `console` app (client id from Secret `console-oidc`; the redirect URI was pre-registered by the workspace-api seed Job). Wave 4: needs that Secret (wave 3) and is useless without workspace-api anyway. Fleet lever `consoleEnabled` in [charts/root/values.yaml](./charts/root/values.yaml)                                                                                            | `fairtier-system` |
 
-All apps sync `automated` + `prune` + `selfHeal` with retries. Sync waves
+All apps sync `automated` + `prune` + `selfHeal` with **unbounded** retries
+(`limit: -1`, backoff capped at 5m). A bounded budget is a trap: ArgoCD never
+auto-retries a revision whose sync failed, so a box that stays overloaded
+longer than the budget (a whole-stack release once livelocked a 4GB box for
+about an hour, killing repo-server so every sync failed on `connection
+refused`) is left half-deployed on that revision until a *new* one is
+released — the agent keeps reporting "already at" and nothing moves. Sync waves
 order Application *creation*; real readiness ordering is handled inside the
 components (wait-for-postgres init containers, migration jobs, ArgoCD
 retries) — ArgoCD 3.x does not health-gate `Application` resources by
