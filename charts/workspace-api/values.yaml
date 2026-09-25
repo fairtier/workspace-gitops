@@ -257,7 +257,12 @@ baseDomain: "fairtier.com"
 # this one needs no canary soak. arrow-go stays at 18.7.0: 18.8.0 pulls avro
 # 1.8.0, which iceberg-go v0.6.0 does not compile against (see the go.mod
 # note in workspace-api).
-image: ghcr.io/fairtier/workspace-api:0.37.2
+#
+# 0.37.3 touches only the embedded NYC-taxi demo: its dbt schema declares
+# `data_tests:` rather than the deprecated `tests:` key, which dbt 1.8+ and
+# dbt-oss v2 both read (the worker runs dbt-core 1.12.5). No migration, so
+# rollback to 0.37.2 is clean.
+image: ghcr.io/fairtier/workspace-api:0.37.3
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 
