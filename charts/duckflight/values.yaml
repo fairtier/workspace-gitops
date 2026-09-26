@@ -52,7 +52,15 @@ image:
   # NOT move, so it needs no matching extensions release and 0.2.1 is a clean
   # rollback. The chart stays at 0.0.7, which is still the newest published
   # tag on ghcr.io/fairtier/charts/duckflight.
-  tag: "0.2.2"
+  #
+  # 0.2.3 stops one missing-table query from draining the connection pool.
+  # DuckDB-Iceberg caches a "namespace does not exist" answer for the life of
+  # the process, and nothing created the `default` namespace every connection
+  # USEs, so after one unqualified typo every replacement connection failed
+  # its boot until nothing answered. Boot now creates `default` if missing,
+  # and a failed CREATE/USE is logged instead of losing the connection. Same
+  # engine and chart; 0.2.2 is a clean rollback.
+  tag: "0.2.3"
 
 # No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
 # into the server image itself, and since chart 0.0.7 an unset extensions.image
