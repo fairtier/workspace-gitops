@@ -155,7 +155,20 @@ baseDomain: "fairtier.com"
 # Also in it: ruff's default rule set is spelled out in pyproject.toml rather
 # than inherited (ruff 0.16 widened its implicit defaults from 59 rules to
 # 413), and the builder-stage uv moves 0.10.10 -> 0.12.15.
-image: ghcr.io/fairtier/dlt-worker:0.17.0
+#
+# 0.18.0 moves transformations from dbt-core 1.12 + dbt-duckdb (Python,
+# in the run child) to **dbt-oss 2.0.5**, a separate binary the run child
+# spawns, with a baked DuckDB 1.5.4 ADBC driver and its iceberg/httpfs/avro
+# extensions (nothing installed at run time). The worker makes an unedited
+# 1.x repo build as is: in its temp clone it merges a `lake` entry into
+# catalogs.yml and adds `use_catalogs_v2` + `+catalog_name: lake` when the
+# repo sets neither — so every model in a repo it builds lands in `lake`,
+# and a *view* model there fails (v2 refuses views in an Iceberg catalog).
+# The dbt child also stops inheriting the worker's environment: a model's
+# env_var() sees an allowlist, not the box's secrets. New bounds default in
+# the worker (DBT_DUCKDB_THREADS=2, DBT_S3_UPLOADER_MAX_FILESIZE=1GB) — the
+# two that let the NYC-taxi demo build at the 192MB limit below.
+image: ghcr.io/fairtier/dlt-worker:0.18.0
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
