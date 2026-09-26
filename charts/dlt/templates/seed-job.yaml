@@ -10,7 +10,7 @@
 #      mint the sidecar access token into Secret dlt-git if absent (Gitea
 #      admin credentials from gitea-secrets);
 #   2. create the Gitea repo `transformations` (the customer's hosted dbt
-#      project) + seed the starter dbt
+#      project) + seed the starter dbt v2
 #      project if absent, and mint the worker's read-only clone token into
 #      Secret transformations-git if absent. profiles.yml is absent from the
 #      template BY DESIGN — the worker generates it at run time from box
@@ -234,8 +234,16 @@ spec:
               staging models with dbt's source() function.
 
               This is a plain git repo: clone it, push to it, or move it to
-              your own git hosting whenever you like. The project runs
-              anywhere dbt-duckdb runs.
+              your own git hosting whenever you like. The project is written
+              for dbt v2 (the open-source dbt-oss build) with its DuckDB
+              adapter, and runs wherever that does. Your warehouse is the
+              `lake` Iceberg catalog in `catalogs.yml`: the box worker
+              replaces that entry with its own at run time, so to build from
+              your laptop point its `endpoint` at your workspace's catalog
+              and define the `lakekeeper` secret in your own profile.
+
+              Models in `lake` must be `table` or `incremental`: dbt cannot
+              create views in an Iceberg catalog.
               EOF
               )
               T_GITIGNORE_B64=$(printf '%s\n' \
@@ -250,10 +258,17 @@ spec:
               model-paths: ["models"]
               macro-paths: ["macros"]
 
+              flags:
+                # Iceberg catalogs come from catalogs.yml (dbt v2).
+                use_catalogs_v2: true
+
               models:
                 fairtier:
-                  # `lake` is your Iceberg warehouse (attached by the worker).
+                  # `lake` is your Iceberg warehouse, defined in catalogs.yml.
+                  # Every model built there needs the catalog, and must be a
+                  # table or an incremental model - no views in `lake`.
                   +database: lake
+                  +catalog_name: lake
                   +materialized: table
                   staging:
                     +schema: staging
@@ -275,41 +290,30 @@ spec:
               {%- endmacro %}`}}
               EOF
               )
-              # Attached Iceberg catalogs can neither RENAME a just-written
-              # table (breaks dbt's default tmp-table + rename swap) nor
-              # CREATE a table dropped in the same transaction — validated
-              # live on the box, both directions. This override replaces the
-              # built-in table materialization with an autocommitted drop +
-              # create. Non-atomic, but derived tables are rebuildable by
-              # definition.
-              T_TABLE_MAT_B64=$(base64 -w0 <<'EOF'
-              {{`{% materialization table, adapter="duckdb" %}
-                {%- set existing_relation = load_cached_relation(this) -%}
-                {%- set target_relation = this.incorporate(type='table') %}
-                {% set grant_config = config.get('grants') %}
-
-                {{ run_hooks(pre_hooks, inside_transaction=False) }}
-
-                {%- if existing_relation is not none -%}
-                  {% call statement('drop_existing', auto_begin=False) -%}
-                    drop table if exists {{ existing_relation }}
-                  {%- endcall %}
-                {%- endif -%}
-
-                {{ run_hooks(pre_hooks, inside_transaction=True) }}
-
-                {% call statement('main') -%}
-                  {{ create_table_as(False, target_relation, compiled_code) }}
-                {%- endcall %}
-
-                {{ run_hooks(post_hooks, inside_transaction=True) }}
-                {% set should_revoke = should_revoke(existing_relation, full_refresh_mode=True) %}
-                {% do apply_grants(target_relation, grant_config, should_revoke=should_revoke) %}
-                {% do persist_docs(target_relation, model) %}
-                {{ adapter.commit() }}
-                {{ run_hooks(post_hooks, inside_transaction=False) }}
-                {{ return({'relations': [target_relation]}) }}
-              {% endmaterialization %}`}}
+              # The `lake` catalog. The worker owns this entry: at run time
+              # it replaces it with its own (same values, plus its write
+              # settings) and keeps any other catalog a customer adds. The
+              # seeded copy makes the repo self-describing, and is the entry
+              # a laptop run edits. `secret` is a NAME: the OAuth2 client
+              # lives in the profile the worker generates, never here. No
+              # override materialization any more: dbt v2 creates Iceberg
+              # tables natively (drop, then create), which is what the 1.x
+              # starter's macros/materialization_table.sql hand-rolled.
+              T_CATALOGS_B64=$(base64 -w0 <<'EOF'
+              # Iceberg catalogs for dbt v2 (flags.use_catalogs_v2 in
+              # dbt_project.yml). The box worker replaces the `lake` entry
+              # with its own at run time; other entries are kept.
+              catalogs:
+                - name: lake
+                  type: iceberg_rest
+                  table_format: iceberg
+                  config:
+                    duckdb:
+                      endpoint: http://lakekeeper:8181/catalog
+                      warehouse: {{ .Values.warehouse }}
+                      secret: lakekeeper
+                      authorization_type: OAUTH2
+                      access_delegation_mode: VENDED_CREDENTIALS
               EOF
               )
               # Self-contained staging -> marts pair so the very first run
@@ -345,7 +349,7 @@ spec:
 
               sources:
                 - name: raw
-                  database: lake
+                  database: lake  # the Iceberg catalog in catalogs.yml
                   schema: my_dataset  # <- your pipeline's dataset name
                   tables:
                     - name: my_table
@@ -353,9 +357,20 @@ spec:
               )
               seed_file transformations ".gitignore" "$T_GITIGNORE_B64" "seed: .gitignore"
               seed_file transformations "README.md" "$T_README_B64" "seed: README"
+              # catalogs.yml only into a fresh starter: an existing repo
+              # predates dbt v2 on the box, and adding its catalog config is
+              # a one-time edit of customer code, not something a sync hook
+              # does on its own (the worker supplies `lake` at run time
+              # either way). Checked, and seeded, before dbt_project.yml, so
+              # a retry of a half-seeded run still counts as fresh.
+              if curl -sf -u "$GITEA_USER:$GITEA_PASS" \
+                "$GITEA/api/v1/repos/$GITEA_USER/transformations/contents/dbt_project.yml?ref=main" >/dev/null; then
+                echo "transformations: existing project, catalogs.yml not seeded"
+              else
+                seed_file transformations "catalogs.yml" "$T_CATALOGS_B64" "seed: catalogs.yml"
+              fi
               seed_file transformations "dbt_project.yml" "$T_PROJECT_B64" "seed: dbt_project.yml"
               seed_file transformations "macros/generate_schema_name.sql" "$T_MACRO_B64" "seed: schema-name macro"
-              seed_file transformations "macros/materialization_table.sql" "$T_TABLE_MAT_B64" "seed: iceberg-safe table materialization"
               seed_file transformations "models/staging/stg_example.sql" "$T_STAGING_B64" "seed: staging example"
               seed_file transformations "models/marts/example.sql" "$T_MODEL_B64" "seed: example model"
               seed_file transformations "models/marts/schema.yml" "$T_SCHEMA_B64" "seed: example tests"
