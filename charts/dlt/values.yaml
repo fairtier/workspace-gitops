@@ -94,8 +94,10 @@ baseDomain: "fairtier.com"
 # 4GB inside the run's temp dir) so a big model spills instead of sizing its
 # buffer manager from the whole box's RAM. Also the 0.7.0 OTel release:
 # traces + metrics, inert unless an OTLP endpoint is configured.
-# Rollback levers, in order of bluntness: TRANSFORMATION_SUBPROCESS=0,
-# DBT_DUCKDB_MEMORY_LIMIT="" (restores DuckDB's own default), pin 0.6.1.
+# Rollback levers, in order of bluntness: DBT_S3_UPLOADER_MAX_FILESIZE="" /
+# DBT_DUCKDB_THREADS="" (each restores DuckDB's own default for that bound),
+# DBT_DUCKDB_MEMORY_LIMIT="", then pin the previous worker tag (0.17.0).
+# There is no in-process lever since 0.18.0: dbt is a separate binary.
 #
 # 0.10.0 adds the `duckdb` source type — extraction through a DuckDB
 # extension (mysql baked into the image), streaming Arrow batches into the
@@ -313,7 +315,11 @@ resources:
 # Watch the first NYC-Taxi-scale dbt build after this lands and re-derive the
 # overhead figure from it; 413MB is one sample, not a measurement series.
 # Empty string restores DuckDB's own default (the documented rollback lever,
-# in order of bluntness: this, then TRANSFORMATION_SUBPROCESS=0, then 0.6.1).
+# in order of bluntness: this, then the previous worker tag).
+#
+# Since 0.18.0 (dbt-oss v2) the non-DuckDB overhead is the dbt binary, not
+# dbt + pyarrow in Python; re-derive the margin from the Phase 2 end-to-end
+# run before trusting the 605MB projection.
 dbtDuckdbMemoryLimit: 192MB
 
 # git operations on state.json + schemas are cheap; rill sidecar parity.
