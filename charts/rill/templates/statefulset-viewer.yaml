@@ -65,13 +65,14 @@ spec:
         # metadata (`..data`, `..2026_*`) that an earlier copy may have
         # captured into /project — Rill scans them and reports a connector
         # "name collision". `cp -RL /config/*` (glob skips hidden) never
-        # re-copies the mount internals.
+        # re-copies the mount internals. It also stages its own static busybox
+        # into `tools` for the rill container's catalog gate (_helpers.tpl).
         - name: copy-project
           image: {{ .Values.copyImage }}
           command:
             - sh
             - -c
-            - "find /project -maxdepth 1 -name '..*' -exec rm -rf {} + 2>/dev/null; cp -RL /config/* /project/"
+            - "find /project -maxdepth 1 -name '..*' -exec rm -rf {} + 2>/dev/null; cp -RL /config/* /project/ && cp /bin/busybox /tools/busybox"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -82,6 +83,8 @@ spec:
               readOnly: true
             - name: project
               mountPath: /project
+            - name: tools
+              mountPath: /tools
       containers:
         - name: rill
           image: {{ .Values.image }}
@@ -102,6 +105,7 @@ spec:
                 printf 'LAKEKEEPER_CLIENT_ID=%s\n'     "$LAKEKEEPER_CLIENT_ID"
                 printf 'LAKEKEEPER_CLIENT_SECRET=%s\n' "$LAKEKEEPER_CLIENT_SECRET"
               } > /project/.env
+              {{- include "rill.catalogGate" . | nindent 14 }}
               exec rill start /project --preview --no-open
           ports:
             - containerPort: 9009
@@ -119,11 +123,23 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.icebergSecretsName }}
                   key: client-secret
+            {{- include "rill.catalogGateEnv" . | nindent 12 }}
           volumeMounts:
             - name: project
               mountPath: /project
+            - name: tools
+              mountPath: /tools
           resources:
             {{- toYaml .Values.viewer.resources | nindent 12 }}
+          # Holds off liveness while the catalog gate waits (it never opens
+          # 9009 until rill starts). 10 minutes, just past the gate's own
+          # timeout, so a timed-out gate exits with its reason in the log
+          # before this would kill it without one.
+          startupProbe:
+            tcpSocket:
+              port: 9009
+            periodSeconds: 10
+            failureThreshold: 60
           livenessProbe:
             tcpSocket:
               port: 9009
@@ -168,6 +184,11 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 30
       volumes:
+        # The catalog gate's busybox and token-request body; rebuilt by
+        # copy-project on every pod start.
+        - name: tools
+          emptyDir:
+            sizeLimit: 8Mi
         - name: rill-config
           configMap:
             name: rill-project

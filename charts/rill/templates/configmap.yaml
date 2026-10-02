@@ -62,7 +62,7 @@ data:
         TYPE iceberg,
         CLIENT_ID '{{ "{{ .env.LAKEKEEPER_CLIENT_ID }}" }}',
         CLIENT_SECRET '{{ "{{ .env.LAKEKEEPER_CLIENT_SECRET }}" }}',
-        OAUTH2_SERVER_URI 'http://casdoor:8000/api/login/oauth/access_token'
+        OAUTH2_SERVER_URI '{{ .Values.catalog.tokenURL }}'
       );
 
       -- ATTACH/DETACH are INSTANCE-wide in DuckDB — one catalog list
@@ -78,7 +78,7 @@ data:
       -- Lakekeeper hand out temporary R2 credentials per request.
       ATTACH IF NOT EXISTS '{{ .Values.warehouse }}' AS lk (
         TYPE iceberg,
-        ENDPOINT 'http://lakekeeper:8181/catalog',
+        ENDPOINT '{{ .Values.catalog.endpoint }}',
         SECRET 'lk_auth'
       );
       -- Deliberately no `USE lk` — iceberg-attached catalogs carry no

@@ -12,5 +12,5 @@ description: >-
   rill.customer-<slug> and a read-only --preview viewer at
   dashboards.customer-<slug>.
 type: application
-version: 0.3.2
+version: 0.3.3
 appVersion: "0.87.8"

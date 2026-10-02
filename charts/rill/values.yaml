@@ -19,7 +19,9 @@ baseDomain: "fairtier.com"
 #
 # No :latest.
 image: rilldata/rill:v0.87.8
-# Copies the ConfigMap project files onto the PVC (shared-path pattern).
+# Copies the ConfigMap project files onto the PVC (shared-path pattern), and
+# stages its static busybox for the catalog gate — the rill image has no
+# curl/wget.
 copyImage: busybox:1.38
 # OIDC gate in front of Rill (`rill start` has no auth of its own; the
 # shared path used an Envoy SecurityPolicy — Traefik OSS has no OIDC
@@ -62,6 +64,17 @@ sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.2
 # Lakekeeper warehouse to ATTACH — box convention, same as DuckFlight
 # (charts/duckflight/values.yaml iceberg.warehouse).
 warehouse: default
+
+# Where the duckdb connector (configmap.yaml) gets its token and catalog, and
+# what the rill container waits on before starting (rill.catalogGate in
+# _helpers.tpl). In-cluster on purpose: the public auth.customer-* hostname
+# hairpins through the node's public IP (see configmap.yaml).
+catalog:
+  tokenURL: http://casdoor:8000/api/login/oauth/access_token
+  endpoint: http://lakekeeper:8181/catalog
+  # Then exit and let the kubelet restart the container, which waits again.
+  # Stays under the 10-minute startupProbe in both StatefulSets.
+  waitTimeoutSeconds: 540
 
 # Secret (keys client-id/client-secret) holding Rill's Lakekeeper catalog
 # client. Rill now rides its own dedicated `rill-iceberg` Casdoor app
