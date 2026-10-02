@@ -10,8 +10,8 @@
 #   - externalDatabase -> on-box postgres (fairtier-system)
 #   - authz -> on-box OpenFGA
 #   - auth.oauth2.providerUri -> injected as an Application helm parameter
-#     (hostname-dependent: https://auth.customer-<slug>.<baseDomain>), and so
-#     is the discovery URL the wait-for-oidc initContainer below polls
+#     (hostname-dependent: https://auth.customer-<slug>.<baseDomain>); the
+#     catalog's start gate below polls its discovery document
 #   - no HTTPRoute; ingress lives in charts/lakekeeper/ingress/
 #
 # Secrets (fairtier-system, existingSecret pattern — nothing in git):
@@ -103,7 +103,7 @@ catalog:
         name: lakekeeper-audiences
 
   # Do not start Lakekeeper until Casdoor is serving a discovery document it
-  # can actually parse.
+  # can actually parse — on EVERY container start, not just the pod's first.
   #
   # Lakekeeper fetches <providerUri>/.well-known/openid-configuration once, at
   # startup, and treats an unparseable answer as FATAL:
@@ -117,84 +117,135 @@ catalog:
   # CrashLoopBackOff lasts, which on 2026-08-27 was 18 restarts over ~45
   # minutes after a memory-pressure livelock restarted Casdoor. Both of that
   # night's iceberg-maintenance attempts died against it, the second one after
-  # streaming 1.4 GiB of a rewrite it could then not commit.
+  # streaming 1.4 GiB of a rewrite it could then not commit. Upstream has no
+  # retry to turn on: the primary provider is hard-wired
+  # require_connected_on_startup, and an *optional* one that fails is dropped
+  # for the life of the process rather than retried.
   #
-  # The catalog being only as available as its identity provider is the real
-  # bug; this makes the recovery *flat* instead of exponential. A blocking init
-  # container is not a retry — a pod that waits is never in backoff, so the
-  # catalog comes back when Casdoor does rather than at whatever point in the
-  # backoff curve it happens to land. Same shape as the wait-for-catalog gate
-  # in charts/iceberg-maintenance, and for the same reason: a blip measured
-  # in seconds should delay a start, not cost 45 minutes.
+  # This used to be a blocking `wait-for-oidc` initContainer, which fixed the
+  # pod-start case and missed the livelock case: a probe kill of a running
+  # catalog restarts the CONTAINER in place, which re-runs its command but
+  # never the initContainers — straight into the fatal fetch. So the wait now
+  # lives in the container's own command, the same move as rill's catalog gate
+  # (charts/rill/templates/_helpers.tpl). A container that waits is never in
+  # backoff, so the catalog comes back when Casdoor does rather than at
+  # whatever point in the backoff curve it happens to land.
+  #
+  # The image is a bare Rust binary on distroless — no shell — so stage-tools
+  # copies a static busybox into the `tools` emptyDir and the command runs the
+  # gate under it, then `exec`s the real binary with the chart's args. It must
+  # be the -musl variant: the default busybox image is linked against a newer
+  # glibc than distroless ships ("GLIBC_2.38 not found").
+  #
+  # The chart gives this ONE command to three containers — the catalog
+  # (`serve`), its check-db initContainer (`wait-for-db`) and the migration
+  # Job (`migrate`) — so the gate runs only for `serve` and everything else
+  # passes straight through. That is also why dbMigrations below stages the
+  # same busybox: the Job runs this command too.
   #
   # It parses the document rather than checking the status code, because the
-  # recorded failure IS a 200-shaped body Lakekeeper could not read. `jq -e`
-  # asks exactly what Lakekeeper asks: is this JSON, and does it carry issuer
-  # and jwks_uri.
+  # recorded failure IS a 200-shaped body Lakekeeper could not read: a JSON
+  # object naming issuer and jwks_uri, which is what Lakekeeper asks for. No
+  # jq in busybox, so it is a shape match, not a parse — enough to tell
+  # Casdoor's document from an HTML error page, which is the failure on
+  # record. The URL is Lakekeeper's own LAKEKEEPER__OPENID_PROVIDER_URI (the
+  # chart's env, from auth.oauth2.providerUri), so the gate cannot poll a
+  # different document than the one Lakekeeper then fetches. busybox wget does
+  # not verify TLS; that is fine for a wait, which trusts nothing it reads.
   #
-  # alpine/k8s (curl + jq) rather than the Lakekeeper image, which is a bare
-  # Rust binary: it is already pulled on every box for the casdoor/gitea/rill/
-  # dlt/workspace-api seed Jobs, so this adds no image to a degraded box.
+  # After WAIT_TIMEOUT_SECONDS it exits 1 and the kubelet restarts the
+  # container, which waits again — the same flat curve with a log line saying
+  # how long. Bounded so a *permanent* misconfiguration (a wrong hostname, a
+  # dead DNS record) still shows as a restarting pod rather than one that
+  # waits forever.
+  command:
+    - /tools/busybox
+    - sh
+    - -c
+    - |
+      if [ "$1" = serve ]; then
+        bb=/tools/busybox
+        url="${LAKEKEEPER__OPENID_PROVIDER_URI%/}/.well-known/openid-configuration"
+        parseable() {
+          doc=$("$bb" wget -q -T 10 -O - "$url" 2>/dev/null) || return 1
+          case "$doc" in
+            "{"*'"issuer"'*'"jwks_uri"'*|"{"*'"jwks_uri"'*'"issuer"'*) return 0 ;;
+          esac
+          return 1
+        }
+        deadline=$(($("$bb" date +%s) + WAIT_TIMEOUT_SECONDS))
+        until parseable; do
+          if [ "$("$bb" date +%s)" -ge "$deadline" ]; then
+            echo "timed out waiting for a parseable OIDC discovery document at $url; exiting so the kubelet restarts and waits again" >&2
+            exit 1
+          fi
+          echo "waiting for $url to serve a parseable OIDC discovery document..."
+          "$bb" sleep 5
+        done
+        echo "OIDC discovery document is parseable; starting lakekeeper"
+      fi
+      exec /home/nonroot/lakekeeper "$@"
+    # $0 for the script above; the chart's `args` (serve / wait-for-db /
+    # migrate) follow it as $1...
+    - lakekeeper-gate
+  extraEnv:
+    # 9 minutes, then exit and restart. Stays under the liveness delay below,
+    # so a timed-out gate exits with its reason in the log before liveness
+    # could kill it without one.
+    - name: WAIT_TIMEOUT_SECONDS
+      value: "540"
+  # The chart has no startupProbe, and its liveness (1s delay, 5 × 5s) kills a
+  # container that has not opened :8181 within ~26s — which is every gate that
+  # waits, turning the wait back into the CrashLoopBackOff it exists to avoid.
+  # So liveness holds off for 10 minutes after each container start. The cost
+  # is that a catalog which hangs inside its first 10 minutes is killed late;
+  # one that crashes still restarts at once, and readiness (unchanged, 1s) is
+  # what keeps traffic off a catalog that is not serving yet.
+  livenessProbe:
+    initialDelaySeconds: 600
   extraInitContainers:
-    - name: wait-for-oidc
-      image: alpine/k8s:1.36.4
-      command: ["/bin/sh", "-c"]
-      args:
-        - |
-          # jq's exit status is the pipeline's, so a curl that fails feeds it
-          # nothing and this is false — one test for "reachable" and
-          # "parseable" together, which is the pair Lakekeeper needs.
-          parseable() {
-            curl -fsS --max-time 10 "$OIDC_DISCOVERY_URL" |
-              jq -e 'has("issuer") and has("jwks_uri")' >/dev/null 2>&1
-          }
-
-          deadline=$(($(date +%s) + WAIT_TIMEOUT_SECONDS))
-          until parseable; do
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "timed out waiting for a parseable OIDC discovery document at $OIDC_DISCOVERY_URL" >&2
-              # Failing here restarts the pod, which waits again — the same
-              # flat curve, just with a log line saying it has been this long.
-              exit 1
-            fi
-            echo "waiting for $OIDC_DISCOVERY_URL to serve a parseable OIDC discovery document..."
-            sleep 5
-          done
-          echo "OIDC discovery document is parseable"
-      env:
-        # Value injected by charts/root/templates/lakekeeper.yaml, which is
-        # where every hostname-dependent parameter lives. It targets
-        # catalog.extraInitContainers[0].env[0].value BY INDEX: keep
-        # wait-for-oidc first in this list and OIDC_DISCOVERY_URL first in its
-        # env, or the parameter lands on the wrong container.
-        - name: OIDC_DISCOVERY_URL
-          value: ""
-        # 10 minutes, then restart and wait again — matching the box's other
-        # start gate. Long enough to cover a Casdoor restart and a box
-        # recovering from memory pressure; bounded so a *permanent*
-        # misconfiguration (a wrong hostname, a dead DNS record) still shows up
-        # as a failing pod rather than one that waits forever in Init.
-        - name: WAIT_TIMEOUT_SECONDS
-          value: "600"
+    - name: stage-tools
+      image: &busybox busybox:1.38-musl
+      command: &stageTools ["/bin/cp", "/bin/busybox", "/tools/busybox"]
       # Pod-level runAsNonRoot needs a numeric uid here: this image's USER is
       # root, and extraInitContainers do not inherit containerSecurityContext
       # above (the chart renders them verbatim).
-      securityContext:
+      securityContext: &stageToolsSecurityContext
         runAsNonRoot: true
         runAsUser: 65532
-        runAsGroup: 65532
+        runAsGroup: 65534
         allowPrivilegeEscalation: false
         capabilities:
           drop: ["ALL"]
-      # A sleep loop with one socket open. It must not reserve anything the
-      # catalog then has to compete for.
-      resources:
+      volumeMounts: &stageToolsMounts
+        - name: tools
+          mountPath: /tools
+      resources: &stageToolsResources
         requests:
           cpu: 10m
           memory: 16Mi
         limits:
           cpu: 100m
-          memory: 64Mi
+          memory: 32Mi
+  # Rendered into the catalog pod AND the migration Job (and the mounts into
+  # check-db too), which is what lets one `command` serve all three.
+  extraVolumes:
+    - name: tools
+      emptyDir:
+        sizeLimit: 8Mi
+  extraVolumeMounts:
+    - name: tools
+      mountPath: /tools
+      readOnly: true
+  dbMigrations:
+    # The migration Job runs catalog.command too, so it needs the same busybox.
+    extraInitContainers:
+      - name: stage-tools
+        image: *busybox
+        command: *stageTools
+        securityContext: *stageToolsSecurityContext
+        volumeMounts: *stageToolsMounts
+        resources: *stageToolsResources
 
 service:
   type: ClusterIP

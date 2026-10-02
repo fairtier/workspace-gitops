@@ -149,8 +149,8 @@ compaction:
   #
   # Bounded, not generous: concurrencyPolicy is Forbid, so a run that waits
   # forever eats the following nights too, and no budget was ever going to
-  # cover that 45-minute crashloop (the blocking wait-for-oidc initContainer
-  # on Lakekeeper is the actual fix for it). This
+  # cover that 45-minute crashloop (Lakekeeper's own OIDC start gate, in
+  # charts/lakekeeper/values.yaml, is the actual fix for it). This
   # buys back a pod restart, which is what the failure usually is. A commit
   # lost to a *concurrent writer* is never retried and never rebased — see
   # commit_swap in the image.
