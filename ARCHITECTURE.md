@@ -194,6 +194,28 @@ components (wait-for-postgres init containers, migration jobs, ArgoCD
 retries) — ArgoCD 3.x does not health-gate `Application` resources by
 default.
 
+That stays deliberate, even though gating would be the direct cure for a
+whole-stack release rolling every component at once. Turning it on (a Lua
+`resource.customizations.health.argoproj.io_Application` check) collides with
+three things in this tree, checked against the v3.4 sync engine:
+
+- a **Degraded** resource does not let the wave proceed — it *fails* the root
+  sync (`getOperationPhase`/the running-task loop in gitops-engine's
+  `sync_context.go`), so one degraded component would hold back every later
+  wave on every release until it healed;
+- under the unbounded retries above, a child whose own sync keeps failing stays
+  in phase `Running` indefinitely, so a gate on "its operation finished" never
+  opens either;
+- a fresh box has no later-wave apps yet, so any early-wave pod that only goes
+  Ready once something in a later wave exists deadlocks the root sync on first
+  boot — not provable without provisioning a box.
+
+What is done instead is to bound the *work* rather than order it: the box's
+ArgoCD runs with concurrency caps sized for a two-core box
+([argocd/templates/helmchartconfig.yaml](./charts/argocd/templates/helmchartconfig.yaml)),
+so a big release queues inside ArgoCD rather than rendering and applying
+everything in parallel.
+
 Version pins and their sources are recorded in
 [charts/root/values.yaml](./charts/root/values.yaml) (chart versions) and the component
 values files (image tags). **Pin everything; no `:latest`.**

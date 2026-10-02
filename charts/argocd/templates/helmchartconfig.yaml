@@ -51,6 +51,38 @@ spec:
         # No inbound access to the box; the API server is only used by
         # the in-cluster controllers.
         server.insecure: true
+        # Concurrency caps, sized for ~20 Applications on a 2-core / 3.8GB box
+        # rather than the upstream defaults, which assume a cluster.
+        #
+        # A whole-stack release (2026-09-25, 3677aa5: seven components at
+        # once) changes every child's targetRevision in one root sync, and
+        # with the defaults ArgoCD then works on all of them together: 20
+        # status processors comparing, 10 operation processors applying, and
+        # repo-server rendering every helm chart in parallel (parallelism
+        # limit 0 = unbounded, one `helm template` fork each). The box sat at
+        # load ~40 with ~150MB available for over an hour without a single OOM
+        # kill, repo-server was liveness-killed in a loop, and
+        # argocd-application-controller peaked at 600MB against ~230MB at rest.
+        #
+        # Under these caps the same release queues instead of piling up. A
+        # release takes a few minutes longer; that is the trade.
+        #   - reposerver.parallelism.limit bounds concurrent manifest
+        #     generations — the forks behind repo-server's liveness kills.
+        #   - controller.repo.server.timeout.seconds is raised to match,
+        #     because a request now waits its turn in that queue and the
+        #     controller would otherwise count the wait as a failed render.
+        #   - status/operation processors bound how many apps the controller
+        #     compares and syncs at once, which is what its RSS scales with.
+        #   - kubectl.parallelism.limit bounds concurrent applies against the
+        #     apiserver — k3s-server was the largest process on the box during
+        #     the incident (1.4GB).
+        # None of this sequences pod rollouts — see "App-of-apps layout" in
+        # ARCHITECTURE.md for why the sync waves are not made to gate.
+        reposerver.parallelism.limit: 2
+        controller.repo.server.timeout.seconds: 180
+        controller.status.processors: 4
+        controller.operation.processors: 2
+        controller.kubectl.parallelism.limit: 4
     # Resource requests exist here for ONE reason: QoS class, not capacity.
     #
     # With no requests a pod is BestEffort, and the kubelet stamps it
