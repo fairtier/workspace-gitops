@@ -25,14 +25,8 @@
 # are created by the FairTier API's worker over the public Lakekeeper URL,
 # exactly as on the shared path.
 
-image:
-  tag: v0.12.4 # patch on the 0.12 line; chart 0.11.0's own appVersion is 0.12.2
-
 postgresql:
   enabled: false # Use the on-box postgres StatefulSet
-
-dbMigrations:
-  enabled: true # Migration job for the external database
 
 externalDatabase:
   type: postgres
@@ -70,6 +64,19 @@ auth:
     providerUri: ""
 
 catalog:
+  # Under `catalog`, like resources below — this chart reads
+  # catalog.image.tag, and a top-level `image.tag` is silently ignored. It sat
+  # top-level from 2026-09-18 (4736775) to 2026-10-02, so every box ran the
+  # chart's appVersion 0.12.2 while this file said 0.12.4.
+  #
+  # 0.12.4 is a one-way door: it applies two migrations
+  # (20260513091606_drop_unique_user_email, 20260525120000_fix_namespace_
+  # trigger_wholerow_when), and 0.12.2's migration Job then refuses the
+  # database with VersionMissing. Rolling back past this is a restore, not a
+  # pin move.
+  image:
+    tag: v0.12.4 # chart 0.11.0's own appVersion is 0.12.2
+
   # Under `catalog`, NOT top-level: this chart nests the catalog Deployment's
   # settings here (the pod carries app.kubernetes.io/component=catalog), and a
   # top-level `resources:` is silently ignored — no error, no warning, the
@@ -189,20 +196,21 @@ catalog:
     # migrate) follow it as $1...
     - lakekeeper-gate
   extraEnv:
-    # 9 minutes, then exit and restart. Stays under the liveness delay below,
-    # so a timed-out gate exits with its reason in the log before liveness
-    # could kill it without one.
+    # 9 minutes, then exit and let the kubelet restart the container, which
+    # waits again.
     - name: WAIT_TIMEOUT_SECONDS
       value: "540"
-  # The chart has no startupProbe, and its liveness (1s delay, 5 × 5s) kills a
-  # container that has not opened :8181 within ~26s — which is every gate that
-  # waits, turning the wait back into the CrashLoopBackOff it exists to avoid.
-  # So liveness holds off for 10 minutes after each container start. The cost
-  # is that a catalog which hangs inside its first 10 minutes is killed late;
-  # one that crashes still restarts at once, and readiness (unchanged, 1s) is
-  # what keeps traffic off a catalog that is not serving yet.
+  # Liveness is OFF; readiness stays on. Since 0.12.4 `/health` answers 503
+  # when Postgres or OpenFGA is unhealthy (it was always 200 before), and the
+  # chart hard-codes liveness to that path — so liveness would kill a healthy
+  # process ~25s into any dependency blip, which on a livelocking box is
+  # exactly when a restart costs most. It would also kill the start gate above
+  # (the chart has no startupProbe), turning a wait back into backoff. What is
+  # lost is detecting a process that is alive but hung, which liveness can no
+  # longer tell from a slow dependency; a crash still restarts at once, and
+  # readiness on `/health` keeps traffic off a catalog that cannot serve.
   livenessProbe:
-    initialDelaySeconds: 600
+    enabled: false
   extraInitContainers:
     - name: stage-tools
       image: &busybox busybox:1.38-musl
@@ -238,6 +246,7 @@ catalog:
       mountPath: /tools
       readOnly: true
   dbMigrations:
+    enabled: true # Migration job for the external database
     # The migration Job runs catalog.command too, so it needs the same busybox.
     extraInitContainers:
       - name: stage-tools
