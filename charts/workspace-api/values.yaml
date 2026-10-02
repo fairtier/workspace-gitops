@@ -262,6 +262,12 @@ baseDomain: "fairtier.com"
 # `data_tests:` rather than the deprecated `tests:` key, which dbt 1.8+ and
 # dbt-oss v2 both read (the worker runs dbt-core 1.12.5). No migration, so
 # rollback to 0.37.2 is clean.
+#
+# 0.38.0 carries 0.37.4 (a Lakekeeper CreateNamespace client call, used by
+# platform_api's catalog reconcile, not by this box) and the transformation
+# drafter's prompt retargeted at dbt-oss v2 (`data_tests:`, append-only
+# incrementals) — what dlt-worker 0.18.0 runs. Prompt text only, no
+# migration, so rollback to 0.37.3 is clean.
 image: ghcr.io/fairtier/workspace-api:0.38.0
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
