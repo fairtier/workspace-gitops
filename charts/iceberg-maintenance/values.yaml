@@ -68,7 +68,10 @@ baseDomain: "fairtier.com"
 #
 # Rollback to 0.9.0 is clean: nothing here changes what is written, only how
 # a failed commit is retried and classified.
-image: ghcr.io/fairtier/iceberg-maintenance:0.10.0
+#
+# 0.10.1 is deps only (refreshed lockfile, actions and uv image); 0.10.0 is a
+# clean rollback.
+image: ghcr.io/fairtier/iceberg-maintenance:0.10.1
 
 # Lakekeeper warehouse to compact — box convention, same as dlt/DuckFlight/
 # Rill (charts/dlt/values.yaml warehouse).

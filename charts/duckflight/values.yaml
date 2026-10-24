@@ -60,7 +60,10 @@ image:
   # its boot until nothing answered. Boot now creates `default` if missing,
   # and a failed CREATE/USE is logged instead of losing the connection. Same
   # engine and chart; 0.2.2 is a clean rollback.
-  tag: "0.2.3"
+  #
+  # 0.2.4 is deps only (otel 1.47, batched dependabot updates; arm64 now built
+  # on a native runner). Same engine and chart; 0.2.3 is a clean rollback.
+  tag: "0.2.4"
 
 # No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
 # into the server image itself, and since chart 0.0.7 an unset extensions.image

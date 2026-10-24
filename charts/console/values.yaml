@@ -120,7 +120,9 @@ baseDomain: "fairtier.com"
 # what `bun run type-check` accepts, not what the browser runs, and the image
 # it produced is the one that passed it. Nothing in the built output is
 # version-dependent, so 0.14.0 is a clean rollback.
-image: "ghcr.io/fairtier/console:0.14.2"
+# 0.14.3 is deps only: source-map-js 1.2.2 (GHSA-68fv-2mgg-jv7q) and the
+# batched dependabot updates; 0.14.2 is a clean rollback.
+image: "ghcr.io/fairtier/console:0.14.3"
 
 # Where the "Account & Billing" link points — the hosting provider's
 # management console. Empty hides the link (the self-host default); on a

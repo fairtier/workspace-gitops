@@ -268,7 +268,10 @@ baseDomain: "fairtier.com"
 # drafter's prompt retargeted at dbt-oss v2 (`data_tests:`, append-only
 # incrementals) — what dlt-worker 0.18.0 runs. Prompt text only, no
 # migration, so rollback to 0.37.3 is clean.
-image: ghcr.io/fairtier/workspace-api:0.38.0
+#
+# 0.38.1 is deps only: Go 1.27.2, x/net v0.60.0 (govulncheck) and the batched
+# dependabot updates. No migration, so rollback to 0.38.0 is clean.
+image: ghcr.io/fairtier/workspace-api:0.38.1
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 

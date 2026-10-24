@@ -168,7 +168,9 @@ baseDomain: "fairtier.com"
 # env_var() sees an allowlist, not the box's secrets. New bounds default in
 # the worker (DBT_DUCKDB_THREADS=2, DBT_S3_UPLOADER_MAX_FILESIZE=1GB) — the
 # two that let the NYC-taxi demo build at the 192MB limit below.
-image: ghcr.io/fairtier/dlt-worker:0.18.0
+# 0.18.1 is deps only (batched dependabot updates, refreshed lockfile); same
+# dbt engine, so 0.18.0 is a clean rollback.
+image: ghcr.io/fairtier/dlt-worker:0.18.1
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
@@ -179,7 +181,9 @@ seedImage: alpine/k8s:1.36.4
 # Go 1.27 rebuild with refreshed deps and 0.3.2 an aws-sdk-go-v2 patch roll
 # (config 1.33.5, s3 1.113.1, credentials 1.20.5, sts 1.51.0) — no behaviour
 # change in either, and none of it is even reached in git mode.
-sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.2
+# 0.3.3 is batched dependabot updates and a cross-compiled arm64 build — no
+# behaviour change.
+sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.3
 
 # Lakekeeper warehouse dlt writes to — box convention, same as DuckFlight and
 # Rill (charts/duckflight/values.yaml iceberg.warehouse).
