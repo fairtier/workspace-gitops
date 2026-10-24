@@ -48,9 +48,11 @@ oauth2ProxyImage: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
 # full patch version of Go (1.26.4) that nothing updated, so it had kept
 # shipping a binary below the 1.26.6 stdlib floor the rest of the fleet moved
 # to. It now builds on 1.27 against a minor-granularity pin.
+# 0.0.4 is the same kind of rebuild, on Go 1.27.3 (GO-2026-6809), with only
+# CI changes behind it; 0.0.3 is a clean rollback.
 deployShim:
   enabled: true
-  image: ghcr.io/fairtier/rill-deploy-shim:0.0.3
+  image: ghcr.io/fairtier/rill-deploy-shim:0.0.4
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 # Git-backed project persistence (SNAPSHOT_BACKEND=git): restore init
