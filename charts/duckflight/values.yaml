@@ -63,7 +63,13 @@ image:
   #
   # 0.2.4 is deps only (otel 1.47, batched dependabot updates; arm64 now built
   # on a native runner). Same engine and chart; 0.2.3 is a clean rollback.
-  tag: "0.2.4"
+  #
+  # 0.2.5 runs multi-statement SQL once. Classifying a script executed all its
+  # statements but the last, and the real run then did them again, so writes
+  # were duplicated and `BEGIN; ...; COMMIT` lost its work. Scripts are not
+  # atomic, and a script now passes rejectClientExtensions wherever its LOAD
+  # sits. Same engine and chart; 0.2.4 is a clean rollback, back to the bug.
+  tag: "0.2.5"
 
 # No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
 # into the server image itself, and since chart 0.0.7 an unset extensions.image
