@@ -388,6 +388,29 @@ assistRelay: true
 # nothing else changes.
 alertRelay: true
 
+# The MCP endpoint: a person's OWN agent (Claude Code, Cursor, any MCP client)
+# operating this workspace — read-only SQL, run status, triggers, workflows,
+# dbt/Rill repo edits — with a workspace access token the person creates.
+# true sets MCP_ENABLED, which makes workspace-api serve /mcp, its OAuth
+# protected-resource metadata and access_token.v1.AccessTokenService on the
+# public port (the Ingress above already publishes `/`, so no routing change).
+# It needs no FairTier service: tokens are checked against this box's own
+# database and its own Casdoor.
+#
+# OFF by default, and a proof of concept when on. Two things to know first:
+#   - The image above predates it. MCP_ENABLED is read by no released
+#     workspace-api, so flipping this before an image that carries the MCP
+#     server is pinned does nothing at all — harmless, and also not a test.
+#   - Its `run_query` tool is guarded lexically only; the query engine
+#     behind it runs every statement with full access (writes, local files,
+#     network). Read workspace-api's docs/mcp.md "Threat model" before
+#     turning it on for anyone but yourself.
+# The root chart passes this per fleet (charts/root/values.yaml mcpEnabled);
+# false — or removing the parameter — is the rollback and changes nothing
+# else.
+mcp:
+  enabled: false
+
 # At-rest encryption of this box's stored credentials. The key is generated on
 # the box and never leaves it, so a rotation here is the box's own business:
 # add the retired key to the `workspace-api-crypto` Secret as `previous`, set

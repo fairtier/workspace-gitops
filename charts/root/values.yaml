@@ -132,6 +132,15 @@ pipelineRun:
   maxRetries: 2
   retryBaseDelaySeconds: 30
 
+# The workspace-api MCP endpoint (charts/workspace-api values `mcp.enabled`,
+# which says what it serves and why it is off). Passed down as a helm
+# parameter rather than gating an Application, because it is one env var on
+# a deployment that is on anyway. Fleet-wide like the gates above: per-BOX
+# rollout is the revision each box pins. A per-box opt-in would be the
+# box-root fixed-point parameter orphanSweepMaxDeletes uses, and is not built
+# because no box needs one yet.
+mcpEnabled: false
+
 # The box-hosted workspace Console (charts/console) — the split Console's
 # workspace half, served at
 # console.customer-<slug>.<baseDomain>. Depends only on things every box

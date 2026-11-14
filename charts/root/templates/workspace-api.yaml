@@ -43,6 +43,8 @@ spec:
           value: "{{ .Values.pipelineRun.maxRetries }}"
         - name: pipelineRun.retryBaseDelaySeconds
           value: "{{ .Values.pipelineRun.retryBaseDelaySeconds }}"
+        - name: mcp.enabled
+          value: "{{ .Values.mcpEnabled | default false }}"
   destination:
     server: https://kubernetes.default.svc
     namespace: "{{ .Values.stackNamespace }}"

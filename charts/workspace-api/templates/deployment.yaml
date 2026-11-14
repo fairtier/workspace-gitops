@@ -202,6 +202,16 @@ spec:
             - name: FAIRTIER_ALERT_RELAY_URL
               value: "https://worker-api.{{ .Values.baseDomain }}"
             {{- end }}
+            {{- /* toString: a helm parameter that arrives as the string "false"
+                 must stay off, not count as a non-empty (truthy) value. */}}
+            {{- if eq (toString (.Values.mcp).enabled) "true" }}
+            # --- MCP endpoint for a person's own agent (values.yaml `mcp`) -
+            # Serves /mcp + AccessTokenService on the public port. The
+            # resource identifier defaults to https://api.<WORKSPACE_CUSTOMER_DOMAIN>/mcp,
+            # which is the Ingress host, so WORKSPACE_API_URL is not set.
+            - name: MCP_ENABLED
+              value: "true"
+            {{- end }}
 
             # --- Box Postgres ------------------------------------------
             # PGPASSWORD must precede PG_DSN so the k8s $(VAR) interpolation
