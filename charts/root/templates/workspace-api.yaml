@@ -35,6 +35,14 @@ spec:
           value: "{{ .Values.slug }}"
         - name: baseDomain
           value: "{{ .Values.baseDomain }}"
+        # The dlt-worker's run limits, so the stuck-run sweep waits them out
+        # — one value, both Applications (root values.yaml pipelineRun).
+        - name: pipelineRun.timeoutSeconds
+          value: "{{ .Values.pipelineRun.timeoutSeconds }}"
+        - name: pipelineRun.maxRetries
+          value: "{{ .Values.pipelineRun.maxRetries }}"
+        - name: pipelineRun.retryBaseDelaySeconds
+          value: "{{ .Values.pipelineRun.retryBaseDelaySeconds }}"
   destination:
     server: https://kubernetes.default.svc
     namespace: "{{ .Values.stackNamespace }}"

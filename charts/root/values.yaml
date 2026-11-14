@@ -114,6 +114,24 @@ workspaceApiEnabled: true
 # everywhere.
 workspacePlaneLocal: true
 
+# How long the dlt-worker may take over one pipeline run — and therefore how
+# long workspace-api's stuck-run sweep must wait before calling a 'running' run
+# dead. Set HERE, not in charts/dlt or charts/workspace-api: this is the one
+# place both Applications read it from (passed as helm parameters below), so
+# the worker and the sweep cannot disagree. They used to: the worker allowed
+# 6h per attempt x 3 attempts on one run row, the sweep (unset, defaulting to
+# 1h) failed every run past an hour while it was still loading.
+#   timeoutSeconds         wall-clock limit per attempt (worker
+#                          PIPELINE_RUN_TIMEOUT_SECONDS; 0 = none, which turns
+#                          the sweep off on workspace-api >= the stuck-sweep fix)
+#   maxRetries             retries after a failed attempt (PIPELINE_MAX_RETRIES)
+#   retryBaseDelaySeconds  first backoff, doubled per retry (PIPELINE_RETRY_BASE_DELAY)
+# The values are the worker's own defaults.
+pipelineRun:
+  timeoutSeconds: 21600
+  maxRetries: 2
+  retryBaseDelaySeconds: 30
+
 # The box-hosted workspace Console (charts/console) — the split Console's
 # workspace half, served at
 # console.customer-<slug>.<baseDomain>. Depends only on things every box

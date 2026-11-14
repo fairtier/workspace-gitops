@@ -139,6 +139,15 @@ spec:
               value: {{ .Values.pollIntervalSeconds | quote }}
             - name: DLT_STATE_DIR
               value: /dlt-state
+            # Run limits. workspace-api's stuck-run sweep reads the same
+            # three values (from charts/root pipelineRun) and waits out all
+            # attempts before failing a run, so set them there, not here.
+            - name: PIPELINE_RUN_TIMEOUT_SECONDS
+              value: {{ .Values.pipelineRun.timeoutSeconds | quote }}
+            - name: PIPELINE_MAX_RETRIES
+              value: {{ .Values.pipelineRun.maxRetries | quote }}
+            - name: PIPELINE_RETRY_BASE_DELAY
+              value: {{ .Values.pipelineRun.retryBaseDelaySeconds | quote }}
             # Drop a load package's staged parquet once the package is fully
             # loaded. dlt's default is to KEEP it, forever, under
             # load/loaded/<load_id>/completed_jobs — so the PVC grows by one

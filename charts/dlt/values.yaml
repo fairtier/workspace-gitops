@@ -192,6 +192,15 @@ warehouse: default
 # How often the worker polls the central API for pipeline configs/triggers.
 pollIntervalSeconds: 60
 
+# The worker's pipeline-run limits. Defaults only: on a box these arrive as
+# helm parameters from charts/root (values.yaml pipelineRun), the one place
+# that feeds both the dlt-worker and workspace-api's stuck-run sweep. Override
+# them there, never here, or the two drift apart.
+pipelineRun:
+  timeoutSeconds: 21600
+  maxRetries: 2
+  retryBaseDelaySeconds: 30
+
 # dlt's execution state (per-pipeline state.json + schemas) lives in an
 # on-box Gitea repo; machine junk (trace.pickle, load/, normalize/) is
 # gitignored there and stays on the PVC. sync = fast-forward pull only when

@@ -330,6 +330,15 @@ duckflightDialURL: "http://duckflight:31337"
 # it off does NOT un-import what a previous sweep already loaded.
 importFromRepo: true
 
+# The worker's pipeline-run limits. Defaults only: on a box these arrive as
+# helm parameters from charts/root (values.yaml pipelineRun), the one place
+# that feeds both the dlt-worker and workspace-api's stuck-run sweep. Override
+# them there, never here, or the two drift apart.
+pipelineRun:
+  timeoutSeconds: 21600
+  maxRetries: 2
+  retryBaseDelaySeconds: 30
+
 # EXTRA browser origins allowed to call this API, appended after the box's
 # own Console origin (console.customer-<slug>.<baseDomain>), which the
 # deployment always allows first — first place is also the Google-OAuth

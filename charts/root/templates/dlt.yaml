@@ -30,6 +30,14 @@ spec:
         # Whether this box's worker polls itself or central (Phase 3C).
         - name: workspacePlaneLocal
           value: "{{ .Values.workspacePlaneLocal }}"
+        # Run limits shared with workspace-api's stuck-run sweep — one value,
+        # both Applications (root values.yaml pipelineRun).
+        - name: pipelineRun.timeoutSeconds
+          value: "{{ .Values.pipelineRun.timeoutSeconds }}"
+        - name: pipelineRun.maxRetries
+          value: "{{ .Values.pipelineRun.maxRetries }}"
+        - name: pipelineRun.retryBaseDelaySeconds
+          value: "{{ .Values.pipelineRun.retryBaseDelaySeconds }}"
   destination:
     server: https://kubernetes.default.svc
     namespace: "{{ .Values.stackNamespace }}"
