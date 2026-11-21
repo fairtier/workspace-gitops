@@ -3,11 +3,31 @@
 slug: ""
 baseDomain: "fairtier.com"
 
-# v0.87.8 — the last patch on the 0.87 line. The line matters more than the
-# patch: the DuckDB/iceberg conn_init_sql in configmap.yaml was hand-validated
-# against v0.87.2 on the (frozen) shared path, and what that validation really
-# pins is the bundled DuckDB/iceberg-extension build, which does not move
-# across a patch. 0.89 does move it, and is a different decision.
+# v0.91.3 — the last patch on the 0.91 line, and a LINE change from 0.87.8.
+# The line is what matters: the DuckDB/iceberg conn_init_sql in
+# configmap.yaml was hand-validated against v0.87.2 on the (frozen) shared
+# path, and what that validation really pins is the bundled DuckDB/iceberg
+# build. This move changes it: DuckDB 1.5.2 -> 1.5.5 (duckdb-go
+# v2.10502.0 -> v2.10505.0; iceberg extension 11fea8ed -> 45163a28). 1.5.5
+# is one patch behind DuckFlight's 1.5.6, so Rill now reads the lake through
+# nearly the same engine. Still DuckDB 1.x: Rill on DuckDB 2.0 is the LAST
+# step of the 2.0 migration, after DuckFlight/dlt-worker/dbt.
+#
+# Checked before pinning (release notes 0.88.0 -> 0.91.3 + source diff):
+# `rill start --no-open` / `--preview` unchanged; duckdb connector still
+# takes init_sql/conn_init_sql (conn_init_sql now runs on a non-cancellable
+# ctx — a fix for pooled connections, not a behaviour we rely on);
+# connectors may still use `.env` (0.91.1 forbids it only in canvas,
+# component, alert, report and API templates); the "Deploy" button the
+# rill-deploy-shim intercepts still has the exact label "Deploy". Run
+# locally on the image: init_sql + the full conn_init_sql (secret token
+# fetch, ATTACH, namespace listing) against a stub REST catalog, memory
+# limit applied.
+#
+# Rollback to v0.87.8 is clean: the only on-PVC change is three ADDITIVE
+# metastore migrations in /project/tmp/meta.db (42-44), which 0.87.8 skips
+# past, and 0.87.8 was started on a dir 0.91.3 had written. /project/tmp is
+# a rebuildable cache either way.
 #
 # The one check that is tag-specific and is NOT re-run by any edit here: Rill
 # ATTACHes the box warehouse on VENDED Lakekeeper credentials, omitting the
@@ -18,7 +38,7 @@ baseDomain: "fairtier.com"
 # the cloud-init R2 credentials already in fairtier-system.
 #
 # No :latest.
-image: rilldata/rill:v0.87.8
+image: rilldata/rill:v0.91.3
 # Copies the ConfigMap project files onto the PVC (shared-path pattern), and
 # stages its static busybox for the catalog gate — the rill image has no
 # curl/wget.

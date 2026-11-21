@@ -13,4 +13,4 @@ description: >-
   dashboards.customer-<slug>.
 type: application
 version: 0.3.3
-appVersion: "0.87.8"
+appVersion: "0.91.3"
