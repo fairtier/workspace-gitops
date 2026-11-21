@@ -170,7 +170,18 @@ baseDomain: "fairtier.com"
 # two that let the NYC-taxi demo build at the 192MB limit below.
 # 0.18.1 is deps only (batched dependabot updates, refreshed lockfile); same
 # dbt engine, so 0.18.0 is a clean rollback.
-image: ghcr.io/fairtier/dlt-worker:0.18.1
+#
+# 0.19.0 runs workspace-api 0.39.0's linear workflows (GetWorkflowConfigs /
+# ReportWorkflowRun; an API without them answers 404 and means "no
+# workflows"), and fixes run accounting: a resumed pending package's rows are
+# counted and its run then extracts its own data, a run's started_at is when
+# it began, and at startup the worker fails every run (and workflow run)
+# still 'running' — a freshly started single worker has none in flight — and
+# reports each through the API, so a pod restart no longer leaves a dead run
+# that Run now keeps answering with. dlt 1.31 -> 1.32; same dbt engine and
+# DuckDB, no new configuration. 0.18.1 is a clean rollback (no state format
+# change), minus the fixes.
+image: ghcr.io/fairtier/dlt-worker:0.19.0
 # kubectl + curl + jq + bash for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 # Git-backed state persistence (SNAPSHOT_BACKEND=git): restore init container
