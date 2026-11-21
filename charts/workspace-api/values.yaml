@@ -271,7 +271,21 @@ baseDomain: "fairtier.com"
 #
 # 0.38.1 is deps only: Go 1.27.2, x/net v0.60.0 (govulncheck) and the batched
 # dependabot updates. No migration, so rollback to 0.38.0 is clean.
-image: ghcr.io/fairtier/workspace-api:0.38.1
+#
+# 0.39.0 adds workflows (workflow.v1: a named, linear list of existing
+# pipelines/transformations with one optional schedule, run by dlt-worker
+# >= 0.19.0 and shown by console >= 0.15.0), the MCP endpoint and access
+# tokens behind `mcp.enabled` below (off), and a stuck-run sweep that derives
+# its timeout from the worker's run limits (pipelineRun, ~19h at the
+# defaults) instead of a fixed 1h. Migrations 000006-000008 only create
+# tables (workflows, access tokens, workflow definition renders). Rollback
+# is NOT clean: an older binary refuses to start at schema version 8 ("no
+# migration found for version 8"), so going back to 0.38.1 means first
+# running 0.39.0's three down migrations (golang-migrate `down 3` with its
+# postgres/migrations) against the workspace_api database. That drops the
+# workflow run history and every access token; workflow definitions survive
+# as workflows/*.yaml in the repository. Take a backup first.
+image: ghcr.io/fairtier/workspace-api:0.39.0
 # kubectl + base64 for the seed Job (github.com/alpine-docker/k8s).
 seedImage: alpine/k8s:1.36.4
 
@@ -398,13 +412,14 @@ alertRelay: true
 # database and its own Casdoor.
 #
 # OFF by default, and a proof of concept when on. Two things to know first:
-#   - The image above predates it. MCP_ENABLED is read by no released
-#     workspace-api, so flipping this before an image that carries the MCP
-#     server is pinned does nothing at all — harmless, and also not a test.
-#   - Its `run_query` tool is guarded lexically only; the query engine
-#     behind it runs every statement with full access (writes, local files,
-#     network). Read workspace-api's docs/mcp.md "Threat model" before
-#     turning it on for anyone but yourself.
+#   - The image above (0.39.0) is the first that reads MCP_ENABLED; while
+#     this is false it serves none of the above, and the bootstrap document
+#     tells the Console so (the AI agents page then explains it is off).
+#   - Its `run_query` tool is guarded lexically only on a box: no read-only
+#     DuckFlight credential is wired here, so agent SQL runs on the
+#     read-write engine with full access (writes, local files, network) —
+#     workspace-api's `guard_only` mode. Read workspace-api's docs/mcp.md
+#     "Threat model" before turning it on for anyone but yourself.
 # The root chart passes this per fleet (charts/root/values.yaml mcpEnabled);
 # false — or removing the parameter — is the rollback and changes nothing
 # else.

@@ -347,7 +347,10 @@ spec:
             # died mid-load; it must never fire on a run the worker is still
             # allowed to finish. It derives its timeout from the worker's own
             # limits under the worker's own names — the same values the dlt
-            # chart gets, from charts/root pipelineRun.
+            # chart gets, from charts/root pipelineRun: every attempt + the
+            # doubling backoff + 1h grace, 19h01m30s at the defaults.
+            # PIPELINE_RUN_STUCK_TIMEOUT could only lengthen that, so it is
+            # not set (images before 0.39.0 read only it, at a hard 1h).
             {{- $run := .Values.pipelineRun }}
             - name: PIPELINE_RUN_TIMEOUT_SECONDS
               value: {{ $run.timeoutSeconds | quote }}
@@ -355,21 +358,6 @@ spec:
               value: {{ $run.maxRetries | quote }}
             - name: PIPELINE_RETRY_BASE_DELAY
               value: {{ $run.retryBaseDelaySeconds | quote }}
-            {{- if gt (int $run.timeoutSeconds) 0 }}
-            # The same bound, precomputed: every attempt + the doubling
-            # backoff + 1h grace (19h01m30s at the defaults). Images before
-            # the stuck-sweep fix ignore the three vars above and would
-            # otherwise sweep at a hard 1h; newer ones derive this themselves
-            # and only ever raise it. Drop it once every pinned image derives.
-            {{- $backoff := 0 }}
-            {{- $delay := int $run.retryBaseDelaySeconds }}
-            {{- range until (int $run.maxRetries) }}
-            {{- $backoff = add $backoff $delay }}
-            {{- $delay = mul $delay 2 }}
-            {{- end }}
-            - name: PIPELINE_RUN_STUCK_TIMEOUT
-              value: "{{ add (mul (add1 (int $run.maxRetries)) (int $run.timeoutSeconds)) $backoff 3600 }}s"
-            {{- end }}
             # The box's own Console origin always leads the list. Order is
             # load-bearing: the FIRST origin is also where the Google OAuth
             # popup postMessages its result (firstCORSOrigin →
