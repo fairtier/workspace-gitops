@@ -71,7 +71,18 @@ baseDomain: "fairtier.com"
 #
 # 0.10.1 is deps only (refreshed lockfile, actions and uv image); 0.10.0 is a
 # clean rollback.
-image: ghcr.io/fairtier/iceberg-maintenance:0.10.1
+#
+# 0.11.0 stops compaction from bringing deleted rows back. DuckDB applies a
+# position delete by file path, whatever its sequence number, so a rewrite of
+# a table whose delete files still name live data files undid those deletes.
+# Such tables are now skipped (counted in tables_unsupported). It stops NEW
+# damage only: a table an older image already rewrote compacts normally and
+# alerts on nothing, and expiry removes its pre-rewrite snapshot after
+# maxSnapshotAgeMs. So BEFORE a channel carrying this commit reaches a box, run
+# the read-only `scripts/detect_delete_exposure.py` from the image repo on that
+# box and keep its JSON (README "Rollout — known limits"). Rollback to 0.10.1
+# is safe for the data already written but brings the bug back.
+image: ghcr.io/fairtier/iceberg-maintenance:0.11.0
 
 # Lakekeeper warehouse to compact — box convention, same as dlt/DuckFlight/
 # Rill (charts/dlt/values.yaml warehouse).
