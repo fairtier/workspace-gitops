@@ -24,7 +24,7 @@ targetRevision: ""
 # Sources for the pins are recorded in ARCHITECTURE.md.
 certManagerChartVersion: "v1.20.4"   # same pin as the central cluster (infra/platform/gateway.tf)
 lakekeeperChartVersion: "0.11.0"     # exact, not the 0.11.x range it was — charts/lakekeeper/values.yaml says why
-duckflightChartVersion: "0.0.7"      # duckflight tag helm/v0.0.7 — extensions.image now means EXTRAS (union over the baked set; unset = no initContainer); 0.0.6 added reconcileSql mount + tempDir (box-only; shared path is ❄️ frozen at 0.0.4)
+duckflightChartVersion: "0.0.8"      # duckflight tag helm/v0.0.8 — optional read-only session values (readOnly.*, auth-readonly-tokens), inert unset; moves with image.tag in charts/duckflight/values.yaml (0.0.8 defaults the tag to `latest`). 0.0.7: extensions.image means EXTRAS (unset = no initContainer); 0.0.6 added reconcileSql mount + tempDir (box-only; shared path is ❄️ frozen at 0.0.4)
 alloyChartVersion: "1.12.1"          # app v1.19.2; pinned here only — see charts/observability/values.yaml
 # Better Stack eBPF collector. Pinned but NOT deployed — see the gate below.
 betterstackCollectorChartVersion: "v0.1.44"

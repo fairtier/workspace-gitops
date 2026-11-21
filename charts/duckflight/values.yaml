@@ -1,7 +1,7 @@
 # DuckFlight chart values for a dedicated-VM box.
 #
 # Chart: OCI ghcr.io/fairtier/charts/duckflight, pinned in
-# charts/root/values.yaml (0.0.5). Values shape mirrors the frozen
+# charts/root/values.yaml (0.0.8). Values shape mirrors the frozen
 # shared-cluster Application.
 # Hostname/slug-dependent values (tenant, iceberg.oauth2URI,
 # otel.serviceName) are injected as Application helm parameters.
@@ -9,7 +9,11 @@
 # Secrets (fairtier-system):
 #   duckflight-auth-secrets:    auth-tokens, auth-users, basic-username,
 #                               basic-password (cloud-init — the token is
-#                               centrally known, shown in the Console)
+#                               centrally known, shown in the Console).
+#                               No `auth-readonly-tokens` key: chart 0.0.8
+#                               maps it (optional) to AUTH_READONLY_TOKENS,
+#                               and adding it is what turns read-only
+#                               sessions on — see readOnly below.
 #   duckflight-iceberg-secrets: client-id, client-secret (Casdoor app for
 #                               DuckFlight — generated ON THE BOX by the
 #                               casdoor-seed Job)
@@ -69,7 +73,18 @@ image:
   # were duplicated and `BEGIN; ...; COMMIT` lost its work. Scripts are not
   # atomic, and a script now passes rejectClientExtensions wherever its LOAD
   # sits. Same engine and chart; 0.2.4 is a clean rollback, back to the bug.
-  tag: "0.2.5"
+  #
+  # 0.3.0 adds credential-bound read-only sessions (a second, hardened DuckDB
+  # instance behind a parser-based statement allowlist), inert unless a
+  # read-only credential or readOnly.enabled is configured, and none is here.
+  # rejectClientExtensions now also refuses LOAD/INSTALL anywhere inside a
+  # multi-statement script, checked by DuckDB's own parser on a small
+  # isolated instance (1 thread, 64MB cap) that runs whether or not read-only
+  # is on. Same engine as 0.2.5 (duckdb-go-bindings v0.10506.0). Needs chart
+  # 0.0.8 (charts/root/values.yaml), whose default image.tag is `latest` —
+  # this pin is what keeps it off a moving tag; move the two together.
+  # 0.2.5 + chart 0.0.7 is a clean rollback.
+  tag: "0.3.0"
 
 # No extras image: the mandatory extensions (iceberg, avro, httpfs) are baked
 # into the server image itself, and since chart 0.0.7 an unset extensions.image
@@ -146,3 +161,19 @@ gateway:
 otel:
   endpoint: alloy.observability.svc.cluster.local:4317
   insecure: true
+
+# Read-only sessions (chart 0.0.8 / image 0.3.0) stay OFF: readOnly is left at
+# the chart defaults and duckflight-auth-secrets carries no
+# `auth-readonly-tokens`. They exist for workspace-api's MCP agent SQL, which
+# is off too (charts/root mcpEnabled). Turning them on is not a values-only
+# change on a box, because that Secret is written by cloud-init, not by this
+# tree. What it takes:
+#   - a random token under `auth-readonly-tokens` in duckflight-auth-secrets,
+#     and the same value to workspace-api as
+#     WORKSPACE_DUCKFLIGHT_READONLY_AUTH_TOKEN (secretKeyRef, optional);
+#   - memory: the read-only instance has its own buffer pool, so the pod
+#     needs resources.memoryLimit + readOnly.memoryLimit inside the 1536Mi
+#     limit above — e.g. memoryLimit 640MiB + readOnly.memoryLimit 256MiB,
+#     or a higher limit;
+#   - readOnly.allowedDirectories narrowed to the warehouse bucket;
+#   - then MCP_REQUIRE_READONLY_ENGINE=true on workspace-api.
