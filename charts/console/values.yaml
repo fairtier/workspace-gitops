@@ -122,7 +122,15 @@ baseDomain: "fairtier.com"
 # version-dependent, so 0.14.0 is a clean rollback.
 # 0.14.3 is deps only: source-map-js 1.2.2 (GHSA-68fv-2mgg-jv7q) and the
 # batched dependabot updates; 0.14.2 is a clean rollback.
-image: "ghcr.io/fairtier/console:0.14.3"
+#
+# 0.15.0 adds the Workflows page (/workflows) over workspace-api 0.39.0's
+# workflow.v1 and the AI agents page (/agents: connect an agent over MCP,
+# manage access tokens). Both settle into a calm explanatory state when the
+# API lacks them — Workflows on an API without WorkflowService, AI agents
+# whenever the bootstrap document says MCP is off, which it is here
+# (charts/root mcpEnabled). No new FT_* configuration. 0.14.3 is a clean
+# rollback; the pages simply disappear.
+image: "ghcr.io/fairtier/console:0.15.0"
 
 # Where the "Account & Billing" link points — the hosting provider's
 # management console. Empty hides the link (the self-host default); on a
