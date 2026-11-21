@@ -194,7 +194,10 @@ seedImage: alpine/k8s:1.36.4
 # change in either, and none of it is even reached in git mode.
 # 0.3.3 is batched dependabot updates and a cross-compiled arm64 build — no
 # behaviour change.
-sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.3
+# 0.3.4 rebuilds on Go 1.27.4 (GO-2026-6859) with batched dependabot
+# updates, 0.3.5 moves x/net to 0.62.0 and x/crypto to 0.59.0 (govulncheck
+# binary-mode clean). No behaviour change; 0.3.3 is a clean rollback.
+sidecarImage: ghcr.io/fairtier/snapshot-sidecar:0.3.5
 
 # Lakekeeper warehouse dlt writes to — box convention, same as DuckFlight and
 # Rill (charts/duckflight/values.yaml iceberg.warehouse).
